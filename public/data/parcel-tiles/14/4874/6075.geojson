@@ -1,0 +1,1 @@
+{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"housing_type":"single_family","housing_type_label":"Single-family","units_bucket":"1","value_band":"<$250k","year_built_decade":"1970s","assessor_record_count":1,"style":"CONV/OLD STYLE"},"geometry":{"type":"Point","coordinates":[-72.904568,42.10044]}}]}

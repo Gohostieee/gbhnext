@@ -1,0 +1,1 @@
+{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"housing_type":"single_family","housing_type_label":"Single-family","units_bucket":"1","value_band":"$2.5M+","year_built_decade":"2010s","assessor_record_count":1,"style":"CUSTOM"},"geometry":{"type":"Point","coordinates":[-70.072489,41.935033]}}]}

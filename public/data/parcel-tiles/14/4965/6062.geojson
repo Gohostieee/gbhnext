@@ -1,0 +1,1 @@
+{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"housing_type":"residential_other","housing_type_label":"Residential other","units_bucket":"unknown","value_band":"$1.0M-$1.49M","year_built_decade":"unknown","assessor_record_count":1},"geometry":{"type":"Point","coordinates":[-70.884096,42.309823]}}]}

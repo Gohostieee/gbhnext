@@ -1,0 +1,1 @@
+{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"housing_type":"residential_land_or_aux","housing_type_label":"Residential land/aux","units_bucket":"unknown","value_band":"$2.5M+","year_built_decade":"1960s","assessor_record_count":1,"style":"Camp"},"geometry":{"type":"Point","coordinates":[-70.464799,41.400577]}}]}

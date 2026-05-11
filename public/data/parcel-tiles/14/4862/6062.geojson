@@ -1,0 +1,1 @@
+{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"housing_type":"single_family","housing_type_label":"Single-family","units_bucket":"unknown","value_band":"<$250k","year_built_decade":"1930s","assessor_record_count":1,"style":"LC"},"geometry":{"type":"Point","coordinates":[-73.150759,42.324299]}}]}

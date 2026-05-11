@@ -1,0 +1,1 @@
+{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"housing_type":"single_family","housing_type_label":"Single-family","units_bucket":"unknown","value_band":"$500k-$749k","year_built_decade":"1850s","assessor_record_count":1,"style":"CAPE"},"geometry":{"type":"Point","coordinates":[-72.39808,42.632914]}}]}

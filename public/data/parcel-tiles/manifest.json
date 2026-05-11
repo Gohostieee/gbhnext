@@ -1,0 +1,79 @@
+{
+  "generated_at": "2026-05-10T16:35:23.424684+00:00",
+  "source": "data\\massgis_residential_parcel_cache.jsonl.gz",
+  "tile_zoom": 14,
+  "min_display_zoom": 14,
+  "feature_count": 1728890,
+  "limited_to_max_features": null,
+  "tile_count": 6511,
+  "housing_type_counts": {
+    "single_family": 1283804,
+    "residential_land_or_aux": 67969,
+    "large_multifamily": 158823,
+    "condo_2_unit_building": 19165,
+    "small_multifamily": 52396,
+    "residential_other": 95411,
+    "two_family": 10104,
+    "condo_1_unit_or_unknown": 2309,
+    "condo_5_9_unit_building": 4676,
+    "condo_3_4_unit_building": 11960,
+    "condo_10_plus_building": 5389,
+    "three_family": 16884
+  },
+  "housing_types": {
+    "single_family": {
+      "label": "Single-family",
+      "color": "#287c71"
+    },
+    "condo_1_unit_or_unknown": {
+      "label": "Condo, 1 unit/unknown",
+      "color": "#8aa0ff"
+    },
+    "condo_2_unit_building": {
+      "label": "Condo, 2-unit building",
+      "color": "#6d7df0"
+    },
+    "condo_3_4_unit_building": {
+      "label": "Condo, 3-4 unit building",
+      "color": "#5b5bd6"
+    },
+    "condo_5_9_unit_building": {
+      "label": "Condo, 5-9 unit building",
+      "color": "#4640b8"
+    },
+    "condo_10_plus_building": {
+      "label": "Condo, 10+ unit building",
+      "color": "#332a86"
+    },
+    "two_family": {
+      "label": "Two-family",
+      "color": "#df9b2f"
+    },
+    "three_family": {
+      "label": "Three-family",
+      "color": "#d66a3a"
+    },
+    "small_multifamily": {
+      "label": "Small multifamily",
+      "color": "#c2477f"
+    },
+    "large_multifamily": {
+      "label": "Large multifamily",
+      "color": "#7c3bb6"
+    },
+    "residential_land_or_aux": {
+      "label": "Residential land/aux",
+      "color": "#98a2b3"
+    },
+    "residential_other": {
+      "label": "Residential other",
+      "color": "#667085"
+    }
+  },
+  "privacy": {
+    "owner_fields": false,
+    "site_address": false,
+    "raw_loc_id": false,
+    "raw_assessed_value": false
+  }
+}

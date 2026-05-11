@@ -1,0 +1,1 @@
+{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"housing_type":"single_family","housing_type_label":"Single-family","units_bucket":"unknown","value_band":"$2.5M+","year_built_decade":"1950s","assessor_record_count":1,"style":"SPLIT LEVEL"},"geometry":{"type":"Point","coordinates":[-70.07783,42.050266]}}]}

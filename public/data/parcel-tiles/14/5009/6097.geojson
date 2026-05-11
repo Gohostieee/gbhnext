@@ -1,0 +1,1 @@
+{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"housing_type":"single_family","housing_type_label":"Single-family","units_bucket":"unknown","value_band":"<$250k","year_built_decade":"1950s","assessor_record_count":12,"style":"COTTAGE"},"geometry":{"type":"Point","coordinates":[-69.932254,41.743607]}}]}

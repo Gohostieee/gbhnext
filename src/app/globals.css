@@ -153,6 +153,10 @@
     background: #f4f4f4;
   }
 
+  .gbh-turf-mode-map {
+    background: #fbfbfb;
+  }
+
   .leaflet-popup-content-wrapper,
   .leaflet-popup-tip {
     background: var(--card);
@@ -176,5 +180,24 @@
 
   .municipality-map-label::before {
     border-top-color: rgb(17 24 39 / 0.75);
+  }
+
+  .gbh-rank-marker {
+    align-items: center;
+    background: #361247;
+    border: 2px solid #f5de00;
+    box-shadow: 0 6px 16px rgb(54 18 71 / 0.36);
+    color: #ffffff;
+    display: flex;
+    font-size: 0.78rem;
+    font-weight: 900;
+    height: 30px;
+    justify-content: center;
+    line-height: 1;
+    width: 30px;
+  }
+
+  .gbh-rank-marker span {
+    transform: translateY(-1px);
   }
 }
