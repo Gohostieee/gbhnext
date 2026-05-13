@@ -2,6 +2,7 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "leaflet/dist/leaflet.css";
+@import "driver.js/dist/driver.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -157,6 +158,20 @@
     background: #fbfbfb;
   }
 
+  .gbh-map-shell:fullscreen,
+  .gbh-map-shell--fullscreen {
+    background: var(--muted);
+    height: 100vh !important;
+    min-height: 100vh !important;
+    width: 100vw;
+  }
+
+  .gbh-map-shell--fullscreen {
+    inset: 0;
+    position: fixed;
+    z-index: 9999;
+  }
+
   .leaflet-popup-content-wrapper,
   .leaflet-popup-tip {
     background: var(--card);
@@ -199,5 +214,54 @@
 
   .gbh-rank-marker span {
     transform: translateY(-1px);
+  }
+
+  .gbh-turf-point-marker {
+    align-items: center;
+    background: #ffffff;
+    border: 2px solid #361247;
+    box-shadow: 0 3px 10px rgb(54 18 71 / 0.35);
+    cursor: grab;
+    display: flex;
+    height: 18px;
+    justify-content: center;
+    width: 18px;
+  }
+
+  .gbh-turf-point-marker:active {
+    cursor: grabbing;
+  }
+
+  .gbh-turf-point-marker span {
+    background: #361247;
+    display: block;
+    height: 6px;
+    width: 6px;
+  }
+
+  .gbh-turf-point-marker--draft {
+    background: #f5de00;
+  }
+
+  .gbh-turf-point-marker--selected {
+    border-color: #f5de00;
+    box-shadow: 0 3px 12px rgb(54 18 71 / 0.5);
+  }
+
+  .gbh-driver-hidden-popover {
+    height: 1px !important;
+    opacity: 0 !important;
+    overflow: hidden !important;
+    pointer-events: none !important;
+    width: 1px !important;
+  }
+
+  .gbh-driver-hidden-popover .driver-popover-arrow,
+  .gbh-driver-hidden-popover .driver-popover-footer {
+    display: none !important;
+  }
+
+  .gbh-tour-dialogue {
+    z-index: 10020;
   }
 }

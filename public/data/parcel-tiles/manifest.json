@@ -1,8 +1,8 @@
 {
-  "generated_at": "2026-05-10T16:35:23.424684+00:00",
+  "generated_at": "2026-05-13T01:25:36.789428+00:00",
   "source": "data\\massgis_residential_parcel_cache.jsonl.gz",
   "tile_zoom": 14,
-  "min_display_zoom": 14,
+  "min_display_zoom": 15,
   "feature_count": 1728890,
   "limited_to_max_features": null,
   "tile_count": 6511,
@@ -74,6 +74,7 @@
     "owner_fields": false,
     "site_address": false,
     "raw_loc_id": false,
-    "raw_assessed_value": false
+    "raw_assessed_value": false,
+    "prosperity_fields": "estimated from assessed-value bands and housing-type resident assumptions"
   }
 }

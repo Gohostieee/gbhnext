@@ -2,6 +2,9 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
+import { driver } from "driver.js";
+import type { Driver } from "driver.js";
+import Image from "next/image";
 import type {
   CircleMarkerOptions,
   GeoJSON as LeafletGeoJSON,
@@ -10,9 +13,11 @@ import type {
   Map as LeafletMap,
   PathOptions,
   Polygon,
+  Renderer,
 } from "leaflet";
 import {
   BarChart3,
+  BookOpen,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -22,12 +27,16 @@ import {
   MousePointer2,
   Layers,
   Loader2,
+  Maximize2,
   MapPinned,
+  Minimize2,
   Navigation,
   Pencil,
+  Plus,
   Radio,
   RotateCcw,
   Search,
+  Sparkles,
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -190,8 +199,45 @@ type DrawnTurfStats = {
   demographics: Array<{ label: string; value: string }>;
   housingCounts: Record<string, number>;
   housingTotal: number;
+  estimatedResidents: number;
+  valuePerResident: number;
+  incomeProxyPerPerson: number;
+  prosperityLabel: string;
+  route: TurfRouteSummary | null;
   loadingHousing: boolean;
   tooLargeForParcels: boolean;
+};
+
+type ParcelProsperitySummary = {
+  estimatedResidents: number;
+  valuePerResidentWeightedTotal: number;
+  incomeProxyWeightedTotal: number;
+};
+
+type TurfRouteStop = {
+  order: number;
+  lat: number;
+  lon: number;
+  housingType: string;
+  label: string;
+};
+
+type TurfRouteSummary = {
+  stops: TurfRouteStop[];
+  start: TurfRouteStop;
+  end: TurfRouteStop;
+  stopCount: number;
+  distanceMiles: number;
+  directDistanceMiles: number;
+};
+
+type TurfRoadRoute = {
+  signature: string;
+  status: "loading" | "ready" | "partial" | "failed";
+  coordinates: TurfPoint[];
+  distanceMiles: number;
+  routedStopCount: number;
+  message: string;
 };
 
 type MapLayerDefinition = {
@@ -230,12 +276,97 @@ type SavedState = Partial<{
   tableView: string;
 }>;
 
+type DashboardTab = "map" | "details" | "scores" | "guide";
+
+type TourStepKey =
+  | "intro"
+  | "live-data"
+  | "tabs"
+  | "map-overview"
+  | "map-area"
+  | "map-layers"
+  | "address-planner"
+  | "build-canvass"
+  | "map-canvas"
+  | "quick-chips"
+  | "insight-panel"
+  | "decision-panel"
+  | "ranked-zones"
+  | "handoff"
+  | "legends"
+  | "fullscreen"
+  | "create-turfs"
+  | "turf-toolbar"
+  | "custom-panel"
+  | "custom-route"
+  | "summary"
+  | "details-filters"
+  | "compare-reset"
+  | "data-table"
+  | "row-preview"
+  | "scores"
+  | "guide"
+  | "outro";
+
+type TourStep = {
+  key: TourStepKey;
+  selector: string;
+  tab: DashboardTab;
+  title: string;
+  dialogue: string;
+};
+
+type ParentTourSnapshot = {
+  activeTab: DashboardTab;
+  search: string;
+  displaySearch: string;
+  counties: string[];
+  municipalities: string[];
+  tiers: string[];
+  minScore: string;
+  sortColumn: string;
+  sortDirection: "asc" | "desc";
+  columnPreset: string;
+  comparisonMode: boolean;
+  page: number;
+  tableView: string;
+  expandedKey: string;
+};
+
+type MapTourAction =
+  | "snapshot"
+  | "restore"
+  | "prepare-map"
+  | "prepare-canvass"
+  | "enable-turf-mode"
+  | "prepare-custom-turf";
+
+type MapTourSnapshot = {
+  showParcelDots: boolean;
+  activeLayerField: string;
+  activePreset: string;
+  activeGeographyPreset: string;
+  mapCounties: string[];
+  mapMunicipalities: string[];
+  canvassQuery: string;
+  canvassRadiusMiles: string;
+  canvassCrewSize: string;
+  canvassShiftHours: string;
+  canvassArea: CanvassArea | null;
+  selectedGid: string;
+  turfMode: boolean;
+  draftTurfPoints: TurfPoint[];
+  drawnTurfs: DrawnTurf[];
+  selectedDrawnTurfId: string;
+  isDraftingNewTurf: boolean;
+};
+
 const csvPath = "/data/scored_turfs_ma_bg_plus_ma_elections.csv";
 const mapGeojsonPath = "/data/ma_block_groups_scored.geojson";
 const municipalGeojsonPath = "/data/ma_municipalities.geojson";
 const parcelTileManifestPath = "/data/parcel-tiles/manifest.json";
 const defaultParcelTileZoom = 14;
-const defaultParcelMinZoom = 14;
+const defaultParcelMinZoom = 15;
 const fallbackParcelHousingTypes: ParcelTileManifest["housing_types"] = {
   single_family: { label: "Single-family", color: "#287c71" },
   condo_1_unit_or_unknown: { label: "Condo, 1 unit/unknown", color: "#8aa0ff" },
@@ -254,6 +385,54 @@ const storageKey = "gbhTurfExplorerState:v1";
 const drawnTurfStorageKey = "gbhCustomTurfs:v1";
 const pageSize = 100;
 const maxTurfParcelTiles = 80;
+const maxParcelTileRequestsPerView = 24;
+const maxNearestNeighborRouteStops = 1600;
+const maxExactEndpointRouteStops = 1200;
+const maxTwoOptRouteStops = 450;
+const maxRoadRouteWaypointsPerRequest = 24;
+const maxRoadRouteAnchorStops = 96;
+const roadRouteServiceUrl = "https://router.project-osrm.org/route/v1/driving";
+const customTurfPaneName = "gbhCustomTurfs";
+const tourMapEventName = "gbh-tour-map-action";
+const tourDemoLocation: PredictionLocation = {
+  lat: 42.3367,
+  lon: -71.2092,
+  label: "1000 Commonwealth Ave, Newton, MA",
+};
+const tourDemoTurfId = "gbh-tour-demo-turf";
+const tourStepDelayMs = 260;
+const tourLongStepDelayMs = 720;
+
+const tourSteps: TourStep[] = [
+  { key: "intro", selector: "[data-tour='app-shell']", tab: "map", title: "The Route Call Begins", dialogue: "Elmo opens the map chest! This app turns Massachusetts block groups into a fast field decision: where to go, what to check, and what to hand to the crew." },
+  { key: "live-data", selector: "[data-tour='live-data']", tab: "map", title: "Loaded And Ready", dialogue: "This little status strip tells you the scored turf data is awake. If the count is loaded, the planning table is set." },
+  { key: "tabs", selector: "[data-tour='main-tabs']", tab: "map", title: "Four Work Modes", dialogue: "Map is the command center, Details is the audit bench, Score Distribution is the sanity check, and Guide is the field playbook." },
+  { key: "map-overview", selector: "[data-tour='map-overview']", tab: "map", title: "Unified Canvass Map", dialogue: "Start here when time is crunchy. You can scout broadly by geography, or build a precise plan from one starting address." },
+  { key: "map-area", selector: "[data-tour='map-area-controls']", tab: "map", title: "Broad Scouting", dialogue: "Area preset, counties, and towns are your overworld map. Use them when you are deciding where to focus before picking an address." },
+  { key: "map-layers", selector: "[data-tour='map-layer-controls']", tab: "map", title: "Layer Spells", dialogue: "Layers change the question the colors answer: ROI, mission fit, door access, avoid pressure, target fit, or raw supporting stats." },
+  { key: "address-planner", selector: "[data-tour='address-planner']", tab: "map", title: "Address Planner", dialogue: "For maximum efficiency, enter the crew start, choose a realistic radius, then set crew size and shift hours so the ranked list matches actual capacity." },
+  { key: "build-canvass", selector: "[data-tour='build-canvass']", tab: "map", title: "Build Canvass", dialogue: "Elmo presses the planning lever with the default Newton demo. The app draws the radius, scores nearby zones, and gets the route-call panel ready." },
+  { key: "map-canvas", selector: "[data-tour='map-canvas']", tab: "map", title: "The Map Itself", dialogue: "Pan, zoom, hover, and click. Tooltips explain the active layer, popups show local stats, and ranked markers jump to your best zones." },
+  { key: "quick-chips", selector: "[data-tour='quick-layer-chips']", tab: "map", title: "Fast Toggles", dialogue: "These chips are the speedrun bar: priority, fit, access, risk, target strength, house dots, and custom turf drawing." },
+  { key: "insight-panel", selector: "[data-tour='insight-panel']", tab: "map", title: "Ranked Visible Areas", dialogue: "This left panel is the shortcut list. Click a row to fly to a high-value block group instead of wandering the map like a confused intern." },
+  { key: "decision-panel", selector: "[data-tour='decision-panel']", tab: "map", title: "Go, Scout, Or Skip", dialogue: "The decision panel weighs ROI, households, donors, revenue, fit, access, risk, confidence, best target, and main risk in one place." },
+  { key: "ranked-zones", selector: "[data-tour='ranked-zones']", tab: "map", title: "Ranked Zones", dialogue: "Use the action badge and message on each zone to choose the best route. Elmo likes high score, good access, and low avoid pressure. Very tasteful." },
+  { key: "handoff", selector: "[data-tour='canvass-handoff']", tab: "map", title: "Copy Or Export", dialogue: "When the call is made, copy the summary for chat or export CSV for the field lead. Less typing, more doing." },
+  { key: "legends", selector: "[data-tour='map-legends']", tab: "map", title: "Dots And Colors", dialogue: "House dots are privacy-safe residential parcel context. The color legend explains the choropleth layer so nobody has to interpret purple vibes." },
+  { key: "fullscreen", selector: "[data-tour='map-fullscreen']", tab: "map", title: "Meeting Mode", dialogue: "Fullscreen makes the map easier to present during a route call. Big map, tiny confusion." },
+  { key: "create-turfs", selector: "[data-tour='create-turfs-chip']", tab: "map", title: "Create Turfs", dialogue: "Turn this on when the ranked list is not enough and you want to draw your own operating territory." },
+  { key: "turf-toolbar", selector: "[data-tour='turf-toolbar']", tab: "map", title: "Drawing Controls", dialogue: "Click New Turf, right-click the map to place points, drag dots to edit, Finish to save, Undo for one step back, Cancel to abandon the draft." },
+  { key: "custom-panel", selector: "[data-tour='custom-turf-panel']", tab: "map", title: "Custom Turf Stats", dialogue: "A saved turf gets its own panel: rename it, inspect block groups, house dots, households, residents, value signals, revenue, fit, access, and risk." },
+  { key: "custom-route", selector: "[data-tour='custom-turf-route']", tab: "map", title: "Door Route And Handoff", dialogue: "When parcel dots are available, the app orders doors and tries an OSM road-following route. Copy or CSV turns the custom turf into a usable field artifact." },
+  { key: "summary", selector: "[data-tour='summary-grid']", tab: "details", title: "Filtered Totals", dialogue: "Details starts with the big totals: rows, visible turfs, average score, revenue, donors, and population for the current filter set." },
+  { key: "details-filters", selector: "[data-tour='details-filters']", tab: "details", title: "Data Explorer Filters", dialogue: "Search by town, county, tract, or GEOID; narrow by county, municipality, tier, or minimum score; then choose the column preset for the job." },
+  { key: "compare-reset", selector: "[data-tour='compare-reset']", tab: "details", title: "Compare And Reset", dialogue: "Compare adds versus-average deltas for numeric cells. Reset clears the board when your filter potion gets too spicy." },
+  { key: "data-table", selector: "[data-tour='data-table']", tab: "details", title: "Sortable Audit Table", dialogue: "Sort any column, read the average row, switch All Turfs versus Municipalities, page through results, and scroll sideways for wider presets." },
+  { key: "row-preview", selector: "[data-tour='row-preview']", tab: "details", title: "Row Preview", dialogue: "Open a row for a mini map, core scores, donor and revenue assumptions, and a Google Maps link for quick local verification." },
+  { key: "scores", selector: "[data-tour='score-chart']", tab: "scores", title: "Score Distribution", dialogue: "This histogram shows whether your filters are producing a strong shortlist or a mushy middle. Elmo respects a clean distribution." },
+  { key: "guide", selector: "[data-tour='guide-tab']", tab: "guide", title: "Field Lead Playbook", dialogue: "The Guide explains the workflow, target profiles, key stats, decision rules, and when to downgrade or avoid a turf." },
+  { key: "outro", selector: "[data-tour='app-shell']", tab: "map", title: "Maximum Efficiency Loop", dialogue: "The pro path: build address plan, inspect fast layers, choose ranked zones, verify dots and access, export the handoff. Elmo closes the quest log." },
+];
 
 const importantColumns = [
   "GIDBG",
@@ -492,6 +671,16 @@ export function TurfDashboard() {
   const [tableView, setTableView] = useState(savedState.tableView ?? "turfs");
   const [page, setPage] = useState(1);
   const [expandedKey, setExpandedKey] = useState("");
+  const [activeTab, setActiveTab] = useState<DashboardTab>("map");
+  const [tourActive, setTourActive] = useState(false);
+  const [activeTourIndex, setActiveTourIndex] = useState(0);
+  const driverRef = useRef<Driver | null>(null);
+  const tourActiveRef = useRef(false);
+  const parentTourSnapshotRef = useRef<ParentTourSnapshot | null>(null);
+  const tourHandlersRef = useRef({
+    end: () => {},
+    move: (delta: number) => { void delta; },
+  });
 
   useEffect(() => {
     fetch(csvPath)
@@ -601,6 +790,183 @@ export function TurfDashboard() {
     };
   }, [filteredRows, primaryScoreCol, rows.length]);
 
+  function dispatchMapTourAction(action: MapTourAction) {
+    window.dispatchEvent(new CustomEvent<{ action: MapTourAction }>(tourMapEventName, { detail: { action } }));
+  }
+
+  function ensureTourDriver() {
+    if (driverRef.current) return driverRef.current;
+    driverRef.current = driver({
+      animate: !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+      allowClose: false,
+      allowKeyboardControl: true,
+      disableActiveInteraction: false,
+      overlayColor: "#361247",
+      overlayOpacity: 0.68,
+      popoverClass: "gbh-driver-hidden-popover",
+      showButtons: [],
+      smoothScroll: true,
+      stagePadding: 8,
+      stageRadius: 0,
+    });
+    return driverRef.current;
+  }
+
+  function snapshotParentTourState() {
+    parentTourSnapshotRef.current = {
+      activeTab,
+      search,
+      displaySearch,
+      counties,
+      municipalities,
+      tiers,
+      minScore,
+      sortColumn,
+      sortDirection,
+      columnPreset,
+      comparisonMode,
+      page,
+      tableView,
+      expandedKey,
+    };
+    dispatchMapTourAction("snapshot");
+  }
+
+  function restoreParentTourState() {
+    const snapshot = parentTourSnapshotRef.current;
+    if (!snapshot) return;
+    setActiveTab(snapshot.activeTab);
+    setSearch(snapshot.search);
+    setDisplaySearch(snapshot.displaySearch);
+    setCounties(snapshot.counties);
+    setMunicipalities(snapshot.municipalities);
+    setTiers(snapshot.tiers);
+    setMinScore(snapshot.minScore);
+    setSortColumn(snapshot.sortColumn);
+    setSortDirection(snapshot.sortDirection);
+    setColumnPreset(snapshot.columnPreset);
+    setComparisonMode(snapshot.comparisonMode);
+    setPage(snapshot.page);
+    setTableView(snapshot.tableView);
+    setExpandedKey(snapshot.expandedKey);
+    dispatchMapTourAction("restore");
+    parentTourSnapshotRef.current = null;
+  }
+
+  async function prepareTourStep(step: TourStep) {
+    if (step.key === "map-overview" || step.key === "map-area" || step.key === "map-layers") {
+      dispatchMapTourAction("prepare-map");
+    }
+    if (step.key === "build-canvass" || step.key === "map-canvas" || step.key === "quick-chips" || step.key === "insight-panel" || step.key === "decision-panel" || step.key === "ranked-zones" || step.key === "handoff" || step.key === "legends" || step.key === "fullscreen") {
+      dispatchMapTourAction("prepare-canvass");
+      await sleep(tourLongStepDelayMs);
+    }
+    if (step.key === "create-turfs" || step.key === "turf-toolbar") {
+      dispatchMapTourAction("enable-turf-mode");
+      await sleep(tourStepDelayMs);
+    }
+    if (step.key === "custom-panel" || step.key === "custom-route") {
+      dispatchMapTourAction("prepare-custom-turf");
+      await sleep(tourLongStepDelayMs);
+    }
+    if (step.key === "data-table") {
+      setExpandedKey("");
+    }
+    if (step.key === "row-preview") {
+      setExpandedKey(pageRows[0] ? rowKey(pageRows[0]) : "");
+      await sleep(tourLongStepDelayMs);
+    }
+    if (step.key === "outro") {
+      dispatchMapTourAction("prepare-canvass");
+    }
+  }
+
+  async function showTourStep(index: number) {
+    const step = tourSteps[index];
+    if (!step) return;
+    setActiveTourIndex(index);
+    setActiveTab(step.tab);
+    await sleep(tourStepDelayMs);
+    await prepareTourStep(step);
+    await sleep(tourStepDelayMs);
+    const target = document.querySelector<HTMLElement>(step.selector)
+      ?? document.querySelector<HTMLElement>("[data-tour='app-shell']")
+      ?? document.body;
+    target.scrollIntoView({
+      block: "center",
+      inline: "center",
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
+    await sleep(tourStepDelayMs);
+    ensureTourDriver().highlight({
+      element: target,
+      popover: {
+        title: step.title,
+        description: step.dialogue,
+        popoverClass: "gbh-driver-hidden-popover",
+      },
+    });
+  }
+
+  async function startTour() {
+    if (!rows.length || loading) {
+      toast.message("Elmo is waiting for the turf data to finish loading.");
+      return;
+    }
+    if (tourActiveRef.current) return;
+    snapshotParentTourState();
+    tourActiveRef.current = true;
+    setTourActive(true);
+    await showTourStep(0);
+  }
+
+  async function endTour(restoreState = true) {
+    tourActiveRef.current = false;
+    setTourActive(false);
+    if (restoreState) restoreParentTourState();
+    driverRef.current?.destroy();
+  }
+
+  function moveTour(delta: number) {
+    const nextIndex = activeTourIndex + delta;
+    if (nextIndex < 0) return;
+    if (nextIndex >= tourSteps.length) {
+      void endTour(true);
+      return;
+    }
+    void showTourStep(nextIndex);
+  }
+
+  useEffect(() => {
+    tourHandlersRef.current = {
+      end: () => void endTour(true),
+      move: moveTour,
+    };
+  });
+
+  useEffect(() => {
+    if (!tourActive) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        tourHandlersRef.current.end();
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        tourHandlersRef.current.move(1);
+      } else if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        tourHandlersRef.current.move(-1);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [tourActive]);
+
+  useEffect(() => () => {
+    tourActiveRef.current = false;
+    driverRef.current?.destroy();
+  }, []);
+
   function resetFilters() {
     setSearch("");
     setDisplaySearch("");
@@ -615,52 +981,57 @@ export function TurfDashboard() {
   }
 
   return (
-    <main className="min-h-screen bg-[#f2f2f2]">
+    <main className="min-h-screen bg-[#f2f2f2] pb-44 md:pb-40" data-tour="app-shell">
       <header className="bg-[#4f1c59] text-white">
-        <div className="mx-auto flex max-w-[1800px] items-center gap-5 px-5 py-3 md:px-12">
-          <div className="flex items-center gap-5">
-            <GbhLogo className="h-16 w-[126px] text-white" />
-            <span className="hidden text-xl font-extrabold tracking-[-0.02em] md:inline">What matters to you.</span>
+        <div className="mx-auto flex max-w-[1920px] items-center justify-between gap-5 px-4 py-2 md:px-8 xl:px-10">
+          <div className="flex items-center gap-4">
+            <GbhLogo className="h-10 w-[92px] text-white md:h-12 md:w-[104px]" />
+            <span className="hidden text-lg font-extrabold tracking-[-0.02em] md:inline">What matters to you.</span>
           </div>
+          <Button type="button" variant="secondary" size="sm" onClick={() => void startTour()} data-tour="start-tour">
+            <Sparkles data-icon="inline-start" />Start Tour
+          </Button>
         </div>
-        <div className="h-4 bg-[#361247]/35 [clip-path:polygon(0_0,24%_0,26%_100%,100%_100%,100%_0)]" />
+        <div className="h-3 bg-[#361247]/35 [clip-path:polygon(0_0,24%_0,26%_100%,100%_100%,100%_0)]" />
       </header>
 
       <section className="bg-[#361247] text-white">
-        <div className="mx-auto grid max-w-[1800px] gap-6 px-5 py-8 md:grid-cols-[1fr_420px] md:px-12">
+        <div className="mx-auto grid max-w-[1920px] gap-5 px-4 py-4 md:grid-cols-[1fr_320px] md:px-8 xl:px-10">
           <div>
-            <div className="mb-4 flex items-center gap-3">
+            <div className="mb-2 flex flex-wrap items-center gap-3" data-tour="live-data">
               <Badge className="bg-[#d90000] text-white"><Radio data-icon="inline-start" />Live data</Badge>
               <span className="font-bold text-[#c1afc9]">{loading ? "Loading scored Massachusetts block groups" : `${whole.format(rows.length)} turfs loaded`}</span>
             </div>
-            <h1 className="max-w-4xl text-5xl font-black leading-[0.95] tracking-[-0.04em] md:text-7xl">GBH Canvass Map</h1>
-            <p className="mt-4 max-w-3xl text-xl font-medium leading-8 text-[#edd4f5]">Enter an address, tune the radius, and make the field decision from the map, house dots, ranked zones, and local stats in one place.</p>
+            <h1 className="max-w-4xl text-3xl font-black leading-[0.98] tracking-[-0.04em] md:text-5xl">GBH Canvass Map</h1>
+            <p className="mt-2 max-w-3xl text-base font-medium leading-6 text-[#edd4f5]">Enter an address, tune the radius, and make the field decision from the map, house dots, ranked zones, and local stats in one place.</p>
           </div>
-          <div className="rounded-none bg-[#5b1f68] p-7 shadow-2xl">
-            <h2 className="text-3xl font-black leading-tight">Built for today&apos;s route call.</h2>
-            <p className="mt-3 text-lg leading-7 text-[#edd4f5]">The default view now answers whether a crew should canvass, scout, or skip a local area before anyone hits the street.</p>
+          <div className="hidden bg-[#5b1f68] p-4 shadow-2xl md:block">
+            <h2 className="text-xl font-black leading-tight">Built for today&apos;s route call.</h2>
+            <p className="mt-2 text-sm leading-5 text-[#edd4f5]">The default view answers whether a crew should canvass, scout, or skip a local area before anyone hits the street.</p>
           </div>
         </div>
       </section>
 
-      <section className="mx-auto max-w-[1800px] px-5 pt-6 md:px-12">
-        <TurfMap rows={rows} rowsLoading={loading} primaryScoreCol={primaryScoreCol} />
-      </section>
-
-      <Tabs defaultValue="details" className="mx-auto flex max-w-[1800px] flex-col gap-5 px-5 py-6 md:px-12">
-        <TabsList className="w-fit bg-white">
-          <TabsTrigger value="details"><MapPinned data-icon="inline-start" />Details</TabsTrigger>
+      <Tabs value={activeTab} onValueChange={value => setActiveTab(value as DashboardTab)} className="mx-auto flex max-w-[1920px] flex-col gap-6 px-4 py-4 md:px-8 xl:px-10">
+        <TabsList className="w-fit bg-white" data-tour="main-tabs">
+          <TabsTrigger value="map"><MapPinned data-icon="inline-start" />Map</TabsTrigger>
+          <TabsTrigger value="details"><Clipboard data-icon="inline-start" />Details</TabsTrigger>
           <TabsTrigger value="scores"><BarChart3 data-icon="inline-start" />Score Distribution</TabsTrigger>
+          <TabsTrigger value="guide"><BookOpen data-icon="inline-start" />Guide</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="details" className="flex flex-col gap-4">
+        <TabsContent value="map">
+          <TurfMap rows={rows} rowsLoading={loading} primaryScoreCol={primaryScoreCol} />
+        </TabsContent>
+
+        <TabsContent value="details" className="flex flex-col gap-6">
           <SummaryGrid summary={summary} loading={loading} />
-          <Card>
+          <Card data-tour="details-filters">
             <CardHeader>
               <CardTitle>All Rows</CardTitle>
               <CardDescription>Use the detailed explorer when you need to audit or compare the underlying block-group data.</CardDescription>
             </CardHeader>
-            <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-[1.25fr_1fr_repeat(3,minmax(160px,0.8fr))_120px_180px_160px_auto]">
+            <CardContent className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-[1.25fr_1fr_repeat(3,minmax(160px,0.8fr))_120px_180px_160px_auto]">
               <LabeledControl label="Search">
                 <div className="relative">
                   <Search className="pointer-events-none absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
@@ -708,7 +1079,7 @@ export function TurfDashboard() {
                   </SelectContent>
                 </Select>
               </LabeledControl>
-              <div className="flex items-end gap-2 sm:col-span-2 lg:col-span-3 2xl:col-span-1">
+              <div className="flex items-end gap-2 sm:col-span-2 lg:col-span-3 2xl:col-span-1" data-tour="compare-reset">
                 <div className="flex h-9 items-center gap-2 border border-border px-3">
                   <Switch checked={comparisonMode} onCheckedChange={checked => { setComparisonMode(checked); setPage(1); setExpandedKey(""); }} />
                   <span className="text-sm font-medium">Compare</span>
@@ -720,13 +1091,13 @@ export function TurfDashboard() {
             </CardContent>
           </Card>
 
-          <Card>
+          <Card data-tour="data-table-card">
             <CardHeader className="gap-3 md:flex-row md:items-center md:justify-between">
               <div>
                 <CardTitle>{tableView === "municipalities" ? "Municipalities" : "Turfs"}</CardTitle>
                 <CardDescription>{tableView === "municipalities" ? "Aggregated from the filtered block groups." : "Browse individual block-group turfs."}</CardDescription>
               </div>
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2" data-tour="data-table-controls">
                 <Tabs value={tableView} onValueChange={value => { setTableView(value); setPage(1); setExpandedKey(""); }}>
                   <TabsList>
                     <TabsTrigger value="turfs">All Turfs</TabsTrigger>
@@ -772,7 +1143,21 @@ export function TurfDashboard() {
         <TabsContent value="scores">
           <ScoreChart rows={filteredRows} primaryScoreCol={primaryScoreCol} />
         </TabsContent>
+
+        <TabsContent value="guide">
+          <GuideTab />
+        </TabsContent>
       </Tabs>
+      {tourActive ? (
+        <ElmoTourDialog
+          step={tourSteps[activeTourIndex]}
+          stepIndex={activeTourIndex}
+          stepCount={tourSteps.length}
+          onPrevious={() => moveTour(-1)}
+          onNext={() => moveTour(1)}
+          onSkip={() => void endTour(true)}
+        />
+      ) : null}
     </main>
   );
 }
@@ -792,6 +1177,40 @@ function GbhLogo({ className }: { className?: string }) {
   );
 }
 
+function ElmoTourDialog({ step, stepIndex, stepCount, onPrevious, onNext, onSkip }: {
+  step?: TourStep;
+  stepIndex: number;
+  stepCount: number;
+  onPrevious: () => void;
+  onNext: () => void;
+  onSkip: () => void;
+}) {
+  if (!step) return null;
+  const isLast = stepIndex >= stepCount - 1;
+  return (
+    <section className="gbh-tour-dialogue fixed inset-x-3 bottom-3 isolate border-4 border-[#361247] bg-[#f5de00] p-2 shadow-[0_18px_60px_rgb(54_18_71_/_0.45)] md:inset-x-8 md:bottom-6" aria-live="polite" aria-label="Elmo tour dialogue">
+      <div className="flex flex-col gap-3 bg-white p-3 md:grid md:grid-cols-[104px_1fr_auto] md:items-center md:p-4">
+        <div className="flex items-center gap-3 md:flex-col md:items-start">
+          <Image src="/elmo.png" alt="Elmo" width={96} height={96} className="size-16 border-2 border-[#361247] object-cover md:size-24" priority={false} />
+          <div className="border-2 border-[#361247] bg-[#361247] px-3 py-1 text-sm font-black uppercase tracking-wide text-white">Elmo</div>
+        </div>
+        <div className="min-w-0">
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <Badge variant="secondary">Step {stepIndex + 1} / {stepCount}</Badge>
+            <h2 className="text-lg font-black leading-tight text-[#361247] md:text-2xl">{step.title}</h2>
+          </div>
+          <p className="max-h-24 overflow-auto text-sm font-medium leading-6 text-foreground md:max-h-none md:text-base">{step.dialogue}</p>
+        </div>
+        <div className="relative z-10 flex flex-wrap items-center justify-end gap-2">
+          <Button type="button" variant="ghost" onClick={onSkip}>Skip</Button>
+          <Button type="button" variant="outline" onClick={onPrevious} disabled={stepIndex <= 0}>Back</Button>
+          <Button type="button" onClick={onNext}>{isLast ? "Finish" : "Next"}</Button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function SummaryGrid({ summary, loading }: { summary: { rows: number; visible: number; average: number; revenue: number; donors: number; population: number }; loading: boolean }) {
   const items = [
     ["Rows", whole.format(summary.rows)],
@@ -802,10 +1221,10 @@ function SummaryGrid({ summary, loading }: { summary: { rows: number; visible: n
     ["Population", whole.format(summary.population)],
   ];
   return (
-    <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+    <section className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6" data-tour="summary-grid">
       {items.map(([label, value]) => (
         <Card key={label} className="bg-white">
-          <CardContent className="flex flex-col gap-1 p-4">
+          <CardContent className="flex flex-col gap-2 p-5">
             <span className="text-xs font-black uppercase tracking-wide text-primary">{label}</span>
             {loading ? <Skeleton className="h-8 w-28" /> : <strong className="truncate text-3xl font-black leading-none text-[#361247]">{value}</strong>}
           </CardContent>
@@ -815,26 +1234,147 @@ function SummaryGrid({ summary, loading }: { summary: { rows: number; visible: n
   );
 }
 
-function LabeledControl({ label, children }: { label: string; children: ReactNode }) {
+function GuideTab() {
+  const workflow = [
+    "Enter the address where the crew would start, then set the radius to the realistic walking or driving area.",
+    "Set crew size and shift hours so the ranked zone list matches today's capacity.",
+    "Use the decision panel first: Go means assign the crew, Scout means verify access or data, Skip means redirect effort.",
+    "Check Field Priority, Mission Fit, Door Access, Avoid Pressure, Target Fit, and House Dots before exporting the plan.",
+  ];
+  const targets = [
+    ["Affluent educated older", "Best public-media fit. Lead with trusted journalism, arts, culture, civic value, and sustaining support."],
+    ["Major donor zones", "High upside, lower volume. Lead with institutional impact, stewardship, preservation, and legacy giving."],
+    ["Professional families", "Strong recurring-donor potential. Lead with local journalism, education, and children's programming."],
+    ["Young urban professionals", "Digitally reachable, civic-minded prospects. Lead with independent journalism, civic impact, and simple signup."],
+  ];
+  const stats = [
+    ["Field Priority", "Best single crew-deployment score. Treat 75+ as a strong field target."],
+    ["Overall ROI", "Fundraising return potential before the final field-access adjustment."],
+    ["Door Access", "How workable the turf is on foot. Weak access can turn a good score into a scout route."],
+    ["Target Fit", "Strength of the strongest donor profiles. Treat 70+ as a serious target signal."],
+    ["Mission Fit", "Geography-level receptiveness to GBH's public-media case, not an individual political label."],
+    ["Avoid Pressure", "Economic stress and transient-renter pressure. High values downgrade door canvassing."],
+    ["Data Confidence", "How much to trust the score. Low confidence means validate before assigning a full crew."],
+    ["House Dots", "Parcel-level housing mix. Use it to spot walkable streets, access issues, and apartment-heavy zones."],
+  ];
+  const rules = [
+    ["Canvass now", "Planner score around 78+, door access 58+, and avoid pressure below 75."],
+    ["Scout first", "Good upside, but low confidence, weak access, heavy apartment mix, or uncertain housing conditions."],
+    ["Mail/digital follow-up", "Some value exists, but the area is not worth an in-person team today."],
+    ["Skip today", "Planner score below 50 or avoid pressure around 82+."],
+  ];
   return (
-    <label className="flex min-w-0 flex-col gap-1.5">
+    <section className="flex flex-col gap-6" data-tour="guide-tab">
+      <Card data-tour="guide-workflow">
+        <CardHeader>
+          <CardTitle>Field Lead Playbook</CardTitle>
+          <CardDescription>Use this as the route-call checklist: target high-return geographies, protect crew time, and validate uncertain areas before sending people door to door.</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {workflow.map((item, index) => (
+            <div key={item} className="border border-border bg-muted/30 p-4">
+              <Badge variant="secondary">Step {index + 1}</Badge>
+              <p className="mt-3 text-sm leading-6 text-muted-foreground">{item}</p>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      <div className="grid gap-6 xl:grid-cols-[1fr_1.25fr]">
+        <Card>
+          <CardHeader>
+            <CardTitle>What To Target Hard</CardTitle>
+            <CardDescription>Start with Field Priority and Target Fit, then use the profile to choose the pitch.</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            {targets.map(([label, description]) => (
+              <GuideRow key={label} label={label} description={description} />
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Stats That Matter</CardTitle>
+            <CardDescription>Read these as field signals, not as a data dictionary.</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3 md:grid-cols-2">
+            {stats.map(([label, description]) => (
+              <GuideStat key={label} label={label} description={description} />
+            ))}
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>Decision Rules</CardTitle>
+            <CardDescription>The panel already calculates these, but this is the mental model behind the call.</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3 sm:grid-cols-2">
+            {rules.map(([label, description]) => (
+              <GuideStat key={label} label={label} description={description} />
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Downgrade Or Avoid</CardTitle>
+            <CardDescription>These signals do not always mean never canvass, but they should protect the crew from low-yield doors.</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <GuideRow label="High Avoid Pressure" description="Economic stress or transient-renter pressure means door fundraising will likely underperform." />
+            <GuideRow label="Weak Door Access" description="Apartment-heavy or secured-entry areas may need scouting before assigning a full team." />
+            <GuideRow label="Low Data Confidence" description="Treat the recommendation as provisional and verify the turf before committing capacity." />
+            <GuideRow label="High Opposition Risk" description="Use as a geography-level audit signal when deciding whether GBH's case for support will land." />
+          </CardContent>
+        </Card>
+      </div>
+    </section>
+  );
+}
+
+function GuideRow({ label, description }: { label: string; description: string }) {
+  return (
+    <div className="border border-border p-4">
+      <div className="font-black text-[#361247]">{label}</div>
+      <p className="mt-1 text-sm leading-6 text-muted-foreground">{description}</p>
+    </div>
+  );
+}
+
+function GuideStat({ label, description }: { label: string; description: string }) {
+  return (
+    <div className="border border-border bg-card p-4">
+      <div className="text-xs font-black uppercase tracking-wide text-primary">{label}</div>
+      <p className="mt-2 text-sm leading-6 text-muted-foreground">{description}</p>
+    </div>
+  );
+}
+
+function LabeledControl({ label, children, tourId }: { label: string; children: ReactNode; tourId?: string }) {
+  return (
+    <label className="flex min-w-0 flex-col gap-1.5" data-tour={tourId}>
       <span className="text-xs font-black uppercase tracking-wide text-muted-foreground">{label}</span>
       {children}
     </label>
   );
 }
 
-function MultiSelect({ label, values, selected, onSelectedChange, emptyLabel }: {
+function MultiSelect({ label, values, selected, onSelectedChange, emptyLabel, tourId }: {
   label: string;
   values: string[];
   selected: string[];
   onSelectedChange: (next: string[]) => void;
   emptyLabel: string;
+  tourId?: string;
 }) {
   const selectedSet = new Set(selected);
   const buttonLabel = selected.length === 0 ? emptyLabel : selected.length === 1 ? selected[0] : `${selected.length} selected`;
   return (
-    <LabeledControl label={label}>
+    <LabeledControl label={label} tourId={tourId}>
       <Popover>
         <PopoverTrigger
           render={
@@ -893,7 +1433,7 @@ function ScoreChart({ rows, primaryScoreCol }: { rows: TurfRow[]; primaryScoreCo
   });
   const max = Math.max(...bins.map(bin => bin.count), 1);
   return (
-    <Card>
+    <Card data-tour="score-chart">
       <CardHeader>
         <CardTitle>Score Distribution</CardTitle>
         <CardDescription>Filtered turfs by contribution likelihood score.</CardDescription>
@@ -928,7 +1468,7 @@ function DataTable(props: {
   setExpandedKey: (value: string) => void;
 }) {
   return (
-    <div className="overflow-hidden border border-border">
+    <div className="overflow-hidden border border-border" data-tour="data-table">
       <ScrollArea className="w-full">
         <Table>
           <TableHeader>
@@ -978,7 +1518,7 @@ function DataTable(props: {
                 <Fragment key={key}>
                   <TableRow key={key} className={expanded ? "bg-muted/60" : undefined}>
                     <TableCell className="sticky left-0 bg-card">
-                      <Button variant="outline" size="sm" onClick={() => props.setExpandedKey(expanded ? "" : key)}>
+                      <Button variant="outline" size="sm" onClick={() => props.setExpandedKey(expanded ? "" : key)} data-tour="row-preview">
                         {expanded ? "Hide" : "View"}
                       </Button>
                     </TableCell>
@@ -1078,6 +1618,7 @@ function PreviewRow({ row, colspan }: { row: TurfRow; colspan: number }) {
 }
 
 function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rowsLoading: boolean; primaryScoreCol: string }) {
+  const mapShellRef = useRef<HTMLDivElement | null>(null);
   const mapNodeRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<LeafletMap | null>(null);
   const turfLayerRef = useRef<LeafletGeoJSON | null>(null);
@@ -1086,10 +1627,15 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
   const radiusLayerRef = useRef<LeafletLayer | null>(null);
   const rankMarkerLayerRef = useRef<LayerGroup | null>(null);
   const parcelLayerRef = useRef<LayerGroup | null>(null);
+  const parcelRendererRef = useRef<Renderer | null>(null);
+  const parcelTileLayerRefsRef = useRef<Map<string, LeafletGeoJSON>>(new Map());
+  const parcelTileLayerSignaturesRef = useRef<Map<string, string>>(new Map());
+  const parcelRefreshFrameRef = useRef<number | null>(null);
   const customTurfLayerRef = useRef<LayerGroup | null>(null);
   const baseTileLayerRef = useRef<LeafletLayer & { setOpacity?: (opacity: number) => void } | null>(null);
   const parcelTileLoadingRef = useRef<Set<string>>(new Set());
   const parcelTileDataRef = useRef<Map<string, GeoJsonCollection>>(new Map());
+  const hasAutoFitMapRef = useRef(false);
   const [leaflet, setLeaflet] = useState<typeof import("leaflet") | null>(null);
   const [geojson, setGeojson] = useState<GeoJsonCollection | null>(null);
   const [municipalGeojson, setMunicipalGeojson] = useState<GeoJsonCollection | null>(null);
@@ -1099,12 +1645,13 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
   const [showParcelDots, setShowParcelDots] = useState(true);
   const [activeLayerField, setActiveLayerField] = useState("map_priority_index");
   const [activePreset, setActivePreset] = useState("");
-  const [activeGeographyPreset, setActiveGeographyPreset] = useState("");
+  const [activeGeographyPreset, setActiveGeographyPreset] = useState("greater_boston");
   const [mapCounties, setMapCounties] = useState<string[]>([]);
   const [mapMunicipalities, setMapMunicipalities] = useState<string[]>([]);
   const [rawLayers, setRawLayers] = useState<MapLayerDefinition[]>([]);
   const [mapViewVersion, setMapViewVersion] = useState(0);
   const [mapZoom, setMapZoom] = useState(8);
+  const [isMapFullscreen, setIsMapFullscreen] = useState(false);
   const [parcelLoadedTileCount, setParcelLoadedTileCount] = useState(0);
   const [parcelRadiusCount, setParcelRadiusCount] = useState(0);
   const [canvassQuery, setCanvassQuery] = useState("1000 Commonwealth Ave, Newton, MA");
@@ -1118,7 +1665,10 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
   const [draftTurfPoints, setDraftTurfPoints] = useState<TurfPoint[]>([]);
   const [drawnTurfs, setDrawnTurfs] = useState<DrawnTurf[]>(() => readDrawnTurfs());
   const [selectedDrawnTurfId, setSelectedDrawnTurfId] = useState("");
+  const [isDraftingNewTurf, setIsDraftingNewTurf] = useState(false);
   const [drawnTurfStats, setDrawnTurfStats] = useState<Record<string, DrawnTurfStats>>({});
+  const [roadRoutes, setRoadRoutes] = useState<Record<string, TurfRoadRoute>>({});
+  const mapTourSnapshotRef = useRef<MapTourSnapshot | null>(null);
 
   const activeLayer = useMemo(
     () => [...mapLayerCatalog, ...rawLayers].find(layer => layer.field === activeLayerField) ?? mapLayerCatalog[0],
@@ -1136,10 +1686,154 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
       ? `Zoom to ${parcelManifest.min_display_zoom ?? defaultParcelMinZoom}+ to show house dots.`
       : `Showing house dots from ${parcelLoadedTileCount} loaded tiles.`;
   const selectedDrawnTurf = useMemo(
-    () => drawnTurfs.find(turf => turf.id === selectedDrawnTurfId) ?? drawnTurfs[0] ?? null,
-    [drawnTurfs, selectedDrawnTurfId],
+    () => isDraftingNewTurf ? null : drawnTurfs.find(turf => turf.id === selectedDrawnTurfId) ?? drawnTurfs[0] ?? null,
+    [drawnTurfs, isDraftingNewTurf, selectedDrawnTurfId],
   );
   const selectedDrawnTurfStats = selectedDrawnTurf ? drawnTurfStats[selectedDrawnTurf.id] : null;
+  const selectedRoadRoute = selectedDrawnTurf ? roadRoutes[selectedDrawnTurf.id] ?? null : null;
+
+  useEffect(() => {
+    const onTourAction = (event: Event) => {
+      const action = (event as CustomEvent<{ action: MapTourAction }>).detail?.action;
+      if (!action) return;
+
+      if (action === "snapshot") {
+        mapTourSnapshotRef.current = {
+          showParcelDots,
+          activeLayerField,
+          activePreset,
+          activeGeographyPreset,
+          mapCounties,
+          mapMunicipalities,
+          canvassQuery,
+          canvassRadiusMiles,
+          canvassCrewSize,
+          canvassShiftHours,
+          canvassArea,
+          selectedGid,
+          turfMode,
+          draftTurfPoints,
+          drawnTurfs,
+          selectedDrawnTurfId,
+          isDraftingNewTurf,
+        };
+        return;
+      }
+
+      if (action === "restore") {
+        const snapshot = mapTourSnapshotRef.current;
+        if (!snapshot) return;
+        setShowParcelDots(snapshot.showParcelDots);
+        setActiveLayerField(snapshot.activeLayerField);
+        setActivePreset(snapshot.activePreset);
+        setActiveGeographyPreset(snapshot.activeGeographyPreset);
+        setMapCounties(snapshot.mapCounties);
+        setMapMunicipalities(snapshot.mapMunicipalities);
+        setCanvassQuery(snapshot.canvassQuery);
+        setCanvassRadiusMiles(snapshot.canvassRadiusMiles);
+        setCanvassCrewSize(snapshot.canvassCrewSize);
+        setCanvassShiftHours(snapshot.canvassShiftHours);
+        setCanvassArea(snapshot.canvassArea);
+        setSelectedGid(snapshot.selectedGid);
+        setTurfMode(snapshot.turfMode);
+        setDraftTurfPoints(snapshot.draftTurfPoints);
+        setDrawnTurfs(snapshot.drawnTurfs);
+        setSelectedDrawnTurfId(snapshot.selectedDrawnTurfId);
+        setIsDraftingNewTurf(snapshot.isDraftingNewTurf);
+        mapTourSnapshotRef.current = null;
+        return;
+      }
+
+      if (action === "prepare-map") {
+        setTurfMode(false);
+        setIsDraftingNewTurf(false);
+        setDraftTurfPoints([]);
+        setCanvassArea(null);
+        setSelectedGid("");
+        setActiveGeographyPreset("greater_boston");
+        setActiveLayerField("map_priority_index");
+        setActivePreset("");
+        setMapCounties([]);
+        setMapMunicipalities([]);
+        setShowParcelDots(true);
+        return;
+      }
+
+      if (action === "prepare-canvass") {
+        const next = buildCanvassAreaFromLocation(tourDemoLocation, rows, primaryScoreCol, 1);
+        setTurfMode(false);
+        setIsDraftingNewTurf(false);
+        setDraftTurfPoints([]);
+        setCanvassQuery(tourDemoLocation.label);
+        setCanvassRadiusMiles("1");
+        setCanvassCrewSize("3");
+        setCanvassShiftHours("3");
+        setCanvassArea(next);
+        setSelectedGid(next.recommendations[0] ? rowKey(next.recommendations[0].row) : "");
+        setActiveLayerField("map_priority_index");
+        setActivePreset("");
+        setActiveGeographyPreset("");
+        setMapCounties([]);
+        setMapMunicipalities([]);
+        setShowParcelDots(true);
+        return;
+      }
+
+      if (action === "enable-turf-mode") {
+        setTurfMode(true);
+        setIsDraftingNewTurf(true);
+        setSelectedDrawnTurfId("");
+        setDraftTurfPoints([]);
+        return;
+      }
+
+      if (action === "prepare-custom-turf") {
+        const demoTurf: DrawnTurf = {
+          id: tourDemoTurfId,
+          name: "Elmo Demo Turf",
+          createdAt: "2026-05-13T00:00:00.000Z",
+          points: [
+            { lat: tourDemoLocation.lat + 0.006, lon: tourDemoLocation.lon - 0.008 },
+            { lat: tourDemoLocation.lat + 0.006, lon: tourDemoLocation.lon + 0.008 },
+            { lat: tourDemoLocation.lat - 0.006, lon: tourDemoLocation.lon + 0.008 },
+            { lat: tourDemoLocation.lat - 0.006, lon: tourDemoLocation.lon - 0.008 },
+          ],
+        };
+        setTurfMode(true);
+        setIsDraftingNewTurf(false);
+        setDraftTurfPoints([]);
+        setDrawnTurfs(current => [
+          demoTurf,
+          ...current.filter(turf => turf.id !== tourDemoTurfId),
+        ]);
+        setSelectedDrawnTurfId(tourDemoTurfId);
+      }
+    };
+
+    window.addEventListener(tourMapEventName, onTourAction);
+    return () => window.removeEventListener(tourMapEventName, onTourAction);
+  }, [
+    activeGeographyPreset,
+    activeLayerField,
+    activePreset,
+    canvassArea,
+    canvassCrewSize,
+    canvassQuery,
+    canvassRadiusMiles,
+    canvassShiftHours,
+    draftTurfPoints,
+    drawnTurfs,
+    isDraftingNewTurf,
+    mapCounties,
+    mapMunicipalities,
+    primaryScoreCol,
+    rows,
+    selectedDrawnTurfId,
+    selectedGid,
+    showParcelDots,
+    turfMode,
+  ]);
+
   const filteredGeojson = useMemo(() => {
     if (!geojson) return null;
     if (canvassArea) {
@@ -1198,6 +1892,21 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
     }, 0);
   }, []);
 
+  const clearRenderedParcelTiles = useCallback(() => {
+    parcelTileLayerRefsRef.current.forEach(layer => layer.remove());
+    parcelTileLayerRefsRef.current.clear();
+    parcelTileLayerSignaturesRef.current.clear();
+    parcelLayerRef.current?.clearLayers();
+  }, []);
+
+  const requestParcelRefresh = useCallback(() => {
+    if (parcelRefreshFrameRef.current !== null) return;
+    parcelRefreshFrameRef.current = window.requestAnimationFrame(() => {
+      parcelRefreshFrameRef.current = null;
+      setMapViewVersion(version => version + 1);
+    });
+  }, []);
+
   useEffect(() => {
     Promise.all([
       fetch(mapGeojsonPath, { cache: "no-store" }).then(response => response.ok ? response.json() : Promise.reject(new Error("Block-group GeoJSON failed to load."))),
@@ -1220,6 +1929,35 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
   }, []);
 
   useEffect(() => {
+    const syncFullscreenState = () => {
+      setIsMapFullscreen(document.fullscreenElement === mapShellRef.current);
+      window.setTimeout(() => mapRef.current?.invalidateSize(), 80);
+    };
+    document.addEventListener("fullscreenchange", syncFullscreenState);
+    return () => document.removeEventListener("fullscreenchange", syncFullscreenState);
+  }, []);
+
+  useEffect(() => {
+    window.setTimeout(() => mapRef.current?.invalidateSize(), 80);
+  }, [isMapFullscreen]);
+
+  const toggleMapFullscreen = useCallback(async () => {
+    const shell = mapShellRef.current;
+    if (!shell) return;
+    try {
+      if (document.fullscreenElement === shell) {
+        await document.exitFullscreen();
+      } else if (shell.requestFullscreen) {
+        await shell.requestFullscreen();
+      } else {
+        setIsMapFullscreen(value => !value);
+      }
+    } catch {
+      setIsMapFullscreen(value => !value);
+    }
+  }, []);
+
+  useEffect(() => {
     fetch(parcelTileManifestPath, { cache: "no-store" })
       .then(response => response.ok ? response.json() : null)
       .then((manifest: ParcelTileManifest | null) => setParcelManifest(manifest))
@@ -1234,6 +1972,9 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
     if (!leaflet || !mapNodeRef.current || mapRef.current) return;
     const map = leaflet.map(mapNodeRef.current, { preferCanvas: true }).setView([42.25, -71.8], 8);
     mapRef.current = map;
+    const customTurfPane = map.createPane(customTurfPaneName);
+    customTurfPane.style.zIndex = "650";
+    customTurfPane.style.pointerEvents = "auto";
     const tileLayer = leaflet.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 18,
       attribution: "&copy; OpenStreetMap contributors",
@@ -1246,11 +1987,17 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
     map.on("moveend zoomend", bumpMapViewVersion);
     return () => {
       map.off("moveend zoomend", bumpMapViewVersion);
+      if (parcelRefreshFrameRef.current !== null) {
+        window.cancelAnimationFrame(parcelRefreshFrameRef.current);
+        parcelRefreshFrameRef.current = null;
+      }
+      clearRenderedParcelTiles();
       map.remove();
       mapRef.current = null;
       baseTileLayerRef.current = null;
+      parcelRendererRef.current = null;
     };
-  }, [leaflet]);
+  }, [clearRenderedParcelTiles, leaflet]);
 
   useEffect(() => {
     baseTileLayerRef.current?.setOpacity?.(turfMode ? 0.48 : 1);
@@ -1260,16 +2007,53 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
   useEffect(() => {
     const map = mapRef.current;
     if (!leaflet || !map) return;
-    const addDraftPoint = (event: { latlng: { lat: number; lng: number }; originalEvent?: Event }) => {
+    const addTurfPoint = (event: { latlng: { lat: number; lng: number }; originalEvent?: Event }) => {
       if (!turfMode) return;
       event.originalEvent?.preventDefault();
-      setDraftTurfPoints(points => [...points, { lat: event.latlng.lat, lon: event.latlng.lng }]);
+      const point = { lat: event.latlng.lat, lon: event.latlng.lng };
+      if (selectedDrawnTurf) {
+        setDrawnTurfs(current => current.map(turf => turf.id === selectedDrawnTurf.id
+          ? { ...turf, points: insertTurfPointByNearestEdge(turf.points, point) }
+          : turf));
+        return;
+      }
+      if (!isDraftingNewTurf) {
+        toast.message("Click New Turf to start a separate turf.");
+        return;
+      }
+      setDraftTurfPoints(points => insertTurfPointByNearestEdge(points, point));
     };
-    map.on("contextmenu", addDraftPoint);
+    map.on("contextmenu", addTurfPoint);
     return () => {
-      map.off("contextmenu", addDraftPoint);
+      map.off("contextmenu", addTurfPoint);
     };
-  }, [leaflet, turfMode]);
+  }, [isDraftingNewTurf, leaflet, selectedDrawnTurf, turfMode]);
+
+  const updateDraftTurfPoint = useCallback((pointIndex: number, point: TurfPoint) => {
+    setDraftTurfPoints(points => points.map((current, index) => index === pointIndex ? point : current));
+  }, []);
+
+  const deleteDraftTurfPoint = useCallback((pointIndex: number) => {
+    setDraftTurfPoints(points => points.filter((_, index) => index !== pointIndex));
+  }, []);
+
+  const updateDrawnTurfPoint = useCallback((turfId: string, pointIndex: number, point: TurfPoint) => {
+    setDrawnTurfs(current => current.map(turf => turf.id === turfId
+      ? { ...turf, points: turf.points.map((currentPoint, index) => index === pointIndex ? point : currentPoint) }
+      : turf));
+  }, []);
+
+  const deleteDrawnTurfPoint = useCallback((turfId: string, pointIndex: number) => {
+    const turf = drawnTurfs.find(item => item.id === turfId);
+    if (!turf) return;
+    if (turf.points.length <= 3) {
+      toast.error("A saved turf needs at least 3 points.");
+      return;
+    }
+    setDrawnTurfs(current => current.map(item => item.id === turfId
+      ? { ...item, points: item.points.filter((_, index) => index !== pointIndex) }
+      : item));
+  }, [drawnTurfs]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1327,12 +2111,13 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
         })
         .addTo(rankLayer);
     });
-    if (!canvassArea) {
+    if (!canvassArea && !hasAutoFitMapRef.current) {
       try {
         map.fitBounds(turfLayerRef.current.getBounds(), { padding: [18, 18] });
       } catch {
         map.setView([42.25, -71.8], 8);
       }
+      hasAutoFitMapRef.current = true;
     }
   }, [activeLayer, activeLayerField, activePreset, canvassArea, filteredGeojson, filteredMunicipalGeojson, leaflet, selectedGid, turfMode, zoomToFeature]);
 
@@ -1342,37 +2127,163 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
     const layerGroup = customTurfLayerRef.current ?? leaflet.layerGroup().addTo(map);
     customTurfLayerRef.current = layerGroup;
     layerGroup.clearLayers();
+    const stopPointEvent = (event: { originalEvent?: Event }) => {
+      if (!event.originalEvent) return;
+      leaflet.DomEvent.stop(event.originalEvent);
+    };
+    const turfPointIcon = (selected: boolean, draft = false) => leaflet.divIcon({
+      className: cn(
+        "gbh-turf-point-marker",
+        selected && "gbh-turf-point-marker--selected",
+        draft && "gbh-turf-point-marker--draft",
+      ),
+      html: "<span></span>",
+      iconSize: [18, 18],
+      iconAnchor: [9, 9],
+    });
 
     drawnTurfs.forEach((turf, index) => {
       if (turf.points.length < 3) return;
       const selected = turf.id === selectedDrawnTurf?.id;
+      const latLngs = turf.points.map(point => [point.lat, point.lon] as [number, number]);
+      const route = selected ? selectedDrawnTurfStats?.route : null;
+      const roadRoute = selected ? selectedRoadRoute : null;
       const polygon = leaflet.polygon(turf.points.map(point => [point.lat, point.lon]), {
         color: selected ? "#361247" : customTurfColor(index),
         fillColor: customTurfColor(index),
         fillOpacity: selected ? 0.28 : 0.16,
         opacity: 0.96,
+        pane: customTurfPaneName,
         weight: selected ? 4 : 2.4,
       }).addTo(layerGroup);
       polygon.bindTooltip(turf.name, { sticky: true });
-      polygon.on("click", () => setSelectedDrawnTurfId(turf.id));
+      polygon.on("click", () => {
+        setIsDraftingNewTurf(false);
+        setDraftTurfPoints([]);
+        setSelectedDrawnTurfId(turf.id);
+      });
+      if (!turfMode || !selected) return;
+
+      if (route && route.stops.length > 1) {
+        const roadCoordinates = roadRoute && (roadRoute.status === "ready" || roadRoute.status === "partial")
+          ? roadRoute.coordinates
+          : [];
+        if (roadCoordinates.length > 1) {
+          const routeLabel = roadRoute?.status === "partial" ? "partial road route" : "road route";
+          leaflet.polyline(roadCoordinates.map(point => [point.lat, point.lon] as [number, number]), {
+            color: "#d9004b",
+            opacity: 0.95,
+            pane: customTurfPaneName,
+            weight: 4,
+          }).bindTooltip(`${turf.name} ${routeLabel}: ${whole.format(route.stopCount)} doors, ${nf.format(roadRoute?.distanceMiles ?? 0)} mi`, { sticky: true }).addTo(layerGroup);
+        }
+        [
+          { stop: route.start, label: "Start", color: "#287c71" },
+          { stop: route.end, label: "End", color: "#d9004b" },
+        ].forEach(item => {
+          leaflet.circleMarker([item.stop.lat, item.stop.lon], {
+            radius: 9,
+            color: "#ffffff",
+            fillColor: item.color,
+            fillOpacity: 1,
+            opacity: 1,
+            pane: customTurfPaneName,
+            weight: 2,
+          }).bindTooltip(`${item.label}: door ${item.stop.order}`, { direction: "top" }).addTo(layerGroup);
+        });
+      }
+
+      leaflet.polyline(latLngs, {
+        color: "#f5de00",
+        dashArray: "4 4",
+        opacity: 0.92,
+        pane: customTurfPaneName,
+        weight: 2,
+      }).addTo(layerGroup);
+      turf.points.forEach((point, pointIndex) => {
+        leaflet.circleMarker([point.lat, point.lon], {
+          radius: 7,
+          color: "#361247",
+          fillColor: "#ffffff",
+          fillOpacity: 1,
+          opacity: 1,
+          pane: customTurfPaneName,
+          weight: 2.5,
+        }).addTo(layerGroup);
+        const marker = leaflet.marker([point.lat, point.lon], {
+          draggable: true,
+          icon: turfPointIcon(true),
+          keyboard: true,
+          pane: customTurfPaneName,
+          zIndexOffset: 1200,
+        }).addTo(layerGroup);
+        marker.bindTooltip(`Drag point ${pointIndex + 1}. Right-click to delete.`, { direction: "top" });
+        marker.on("click", event => {
+          stopPointEvent(event);
+          setIsDraftingNewTurf(false);
+          setDraftTurfPoints([]);
+          setSelectedDrawnTurfId(turf.id);
+        });
+        marker.on("dragstart", () => {
+          setIsDraftingNewTurf(false);
+          setDraftTurfPoints([]);
+          setSelectedDrawnTurfId(turf.id);
+        });
+        marker.on("dragend", (event: { target: { getLatLng: () => { lat: number; lng: number } } }) => {
+          const latLng = event.target.getLatLng();
+          updateDrawnTurfPoint(turf.id, pointIndex, { lat: latLng.lat, lon: latLng.lng });
+        });
+        marker.on("contextmenu", event => {
+          stopPointEvent(event);
+          deleteDrawnTurfPoint(turf.id, pointIndex);
+        });
+      });
     });
 
     if (draftTurfPoints.length) {
       const latLngs = draftTurfPoints.map(point => [point.lat, point.lon] as [number, number]);
-      if (draftTurfPoints.length > 1) {
-        leaflet.polyline(latLngs, { color: "#f5de00", opacity: 1, weight: 3, dashArray: "6 5" }).addTo(layerGroup);
+      if (draftTurfPoints.length >= 3) {
+        leaflet.polygon(latLngs, {
+          color: "#361247",
+          fillColor: "#f5de00",
+          fillOpacity: 0.2,
+          opacity: 0.95,
+          pane: customTurfPaneName,
+          weight: 3,
+        }).addTo(layerGroup);
+      } else if (draftTurfPoints.length > 1) {
+        leaflet.polyline(latLngs, { color: "#f5de00", opacity: 1, weight: 3, dashArray: "6 5", pane: customTurfPaneName }).addTo(layerGroup);
       }
       draftTurfPoints.forEach((point, index) => {
         leaflet.circleMarker([point.lat, point.lon], {
-          radius: 5,
+          radius: 7,
           color: "#361247",
           fillColor: "#f5de00",
           fillOpacity: 1,
-          weight: 2,
-        }).bindTooltip(`Point ${index + 1}`).addTo(layerGroup);
+          opacity: 1,
+          pane: customTurfPaneName,
+          weight: 2.5,
+        }).addTo(layerGroup);
+        const marker = leaflet.marker([point.lat, point.lon], {
+          draggable: true,
+          icon: turfPointIcon(false, true),
+          keyboard: true,
+          pane: customTurfPaneName,
+          zIndexOffset: 1300,
+        }).addTo(layerGroup);
+        marker.bindTooltip(`Drag point ${index + 1}. Right-click to delete.`, { direction: "top" });
+        marker.on("click", stopPointEvent);
+        marker.on("dragend", (event: { target: { getLatLng: () => { lat: number; lng: number } } }) => {
+          const latLng = event.target.getLatLng();
+          updateDraftTurfPoint(index, { lat: latLng.lat, lon: latLng.lng });
+        });
+        marker.on("contextmenu", event => {
+          stopPointEvent(event);
+          deleteDraftTurfPoint(index);
+        });
       });
     }
-  }, [draftTurfPoints, drawnTurfs, leaflet, selectedDrawnTurf?.id]);
+  }, [deleteDraftTurfPoint, deleteDrawnTurfPoint, draftTurfPoints, drawnTurfs, leaflet, selectedDrawnTurf?.id, selectedDrawnTurfStats?.route, selectedRoadRoute, turfMode, updateDraftTurfPoint, updateDrawnTurfPoint]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1406,7 +2317,7 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
     marker.bindPopup(`<strong>${escapeHtml(location.label)}</strong><br>${nf.format(radiusMiles)} mile canvass radius`);
     addressMarkerRef.current = marker;
     radiusLayerRef.current = radius;
-    map.fitBounds(radius.getBounds(), { animate: true, maxZoom: 15, paddingTopLeft: [40, 140], paddingBottomRight: [430, 40] });
+    map.fitBounds(radius.getBounds(), { animate: true, maxZoom: 15, paddingTopLeft: [40, 160], paddingBottomRight: [382, 40] });
     marker.openPopup();
   }, [canvassArea, leaflet]);
 
@@ -1417,6 +2328,7 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
     const tileZoom = parcelManifest?.tile_zoom ?? defaultParcelTileZoom;
 
     if (!showParcelDots) {
+      clearRenderedParcelTiles();
       parcelLayerRef.current?.remove();
       parcelLayerRef.current = null;
       deferParcelCounts(0, 0);
@@ -1428,6 +2340,7 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
     }
 
     if (map.getZoom() < minZoom) {
+      clearRenderedParcelTiles();
       parcelLayerRef.current?.remove();
       parcelLayerRef.current = null;
       deferParcelCounts(0, 0);
@@ -1436,34 +2349,60 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
 
     const layerGroup = parcelLayerRef.current ?? leaflet.layerGroup().addTo(map);
     parcelLayerRef.current = layerGroup;
-    layerGroup.clearLayers();
+    const renderer = parcelRendererRef.current ?? leaflet.canvas({ padding: 0.5 });
+    parcelRendererRef.current = renderer;
     const tileKeys = visibleParcelTileKeys(map, tileZoom);
+    const visibleTileKeys = new Set(tileKeys);
+    const filterSignature = canvassArea
+      ? `${canvassArea.location.lat.toFixed(5)},${canvassArea.location.lon.toFixed(5)},${canvassArea.radiusMiles.toFixed(3)}`
+      : "all";
+
+    parcelTileLayerRefsRef.current.forEach((layer, key) => {
+      if (!visibleTileKeys.has(key)) {
+        layer.remove();
+        parcelTileLayerRefsRef.current.delete(key);
+        parcelTileLayerSignaturesRef.current.delete(key);
+      }
+    });
+
     let renderedTiles = 0;
     let radiusDots = 0;
-    const renderTile = (tile: GeoJsonCollection) => {
+    const renderTile = (key: string, tile: GeoJsonCollection) => {
       const features = canvassArea
         ? tile.features.filter(feature => pointFeatureWithinRadius(feature, canvassArea.location, canvassArea.radiusMiles))
         : tile.features;
       if (canvassArea) radiusDots += features.length;
-      if (!features.length) return;
+      if (!features.length) {
+        parcelTileLayerRefsRef.current.get(key)?.remove();
+        parcelTileLayerRefsRef.current.delete(key);
+        parcelTileLayerSignaturesRef.current.set(key, filterSignature);
+        return;
+      }
       renderedTiles += 1;
-      leaflet.geoJSON({ ...tile, features } as GeoJSON.GeoJsonObject, {
-        pointToLayer: (feature, latlng) => leaflet.circleMarker(latlng, parcelDotStyle(feature as GeoJsonFeature, parcelManifest)),
+      if (parcelTileLayerSignaturesRef.current.get(key) === filterSignature && parcelTileLayerRefsRef.current.has(key)) return;
+
+      parcelTileLayerRefsRef.current.get(key)?.remove();
+      const tileLayer = leaflet.geoJSON({ ...tile, features } as GeoJSON.GeoJsonObject, {
+        pointToLayer: (feature, latlng) => leaflet.circleMarker(latlng, parcelDotStyle(feature as GeoJsonFeature, parcelManifest, renderer)),
         onEachFeature: (feature, layer) => {
           const properties = (feature as GeoJsonFeature).properties || {};
           layer.bindTooltip(parcelTooltipHtml(properties), { sticky: true });
           layer.bindPopup(parcelPopupHtml(properties));
         },
       }).addTo(layerGroup);
+      parcelTileLayerRefsRef.current.set(key, tileLayer);
+      parcelTileLayerSignaturesRef.current.set(key, filterSignature);
     };
 
     tileKeys.forEach(key => {
       const cachedTile = parcelTileDataRef.current.get(key);
-      if (cachedTile) renderTile(cachedTile);
+      if (cachedTile) renderTile(key, cachedTile);
     });
     deferParcelCounts(renderedTiles, canvassArea ? radiusDots : 0);
 
-    const uncachedTileKeys = tileKeys.filter(key => !parcelTileDataRef.current.has(key) && !parcelTileLoadingRef.current.has(key));
+    const uncachedTileKeys = tileKeys
+      .filter(key => !parcelTileDataRef.current.has(key) && !parcelTileLoadingRef.current.has(key))
+      .slice(0, maxParcelTileRequestsPerView);
 
     uncachedTileKeys.forEach(key => {
       parcelTileLoadingRef.current.add(key);
@@ -1473,13 +2412,13 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
         .then((tile: GeoJsonCollection | null) => {
           parcelTileLoadingRef.current.delete(key);
           if (tile) parcelTileDataRef.current.set(key, tile);
-          setMapViewVersion(version => version + 1);
+          requestParcelRefresh();
         })
         .catch(() => {
           parcelTileLoadingRef.current.delete(key);
         });
     });
-  }, [canvassArea, deferParcelCounts, leaflet, mapViewVersion, parcelManifest, showParcelDots]);
+  }, [canvassArea, clearRenderedParcelTiles, deferParcelCounts, leaflet, mapViewVersion, parcelManifest, requestParcelRefresh, showParcelDots]);
 
   useEffect(() => {
     if (!geojson || !drawnTurfs.length) {
@@ -1491,7 +2430,7 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
       const cachedHousing = countTurfHousingFromTiles(turf, turfTileKeys(turf, parcelManifest?.tile_zoom ?? defaultParcelTileZoom), parcelTileDataRef.current);
       return [
         turf.id,
-        summarizeDrawnTurf(turf, geojson, primaryScoreCol, cachedHousing.counts, cachedHousing.total, Boolean(parcelManifest), false),
+        summarizeDrawnTurf(turf, geojson, primaryScoreCol, cachedHousing.counts, cachedHousing.total, cachedHousing.prosperity, cachedHousing.route, Boolean(parcelManifest), false),
       ];
     }));
     window.setTimeout(() => {
@@ -1504,7 +2443,7 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
       const tileKeys = turfTileKeys(turf, tileZoom);
       const tooLargeForParcels = tileKeys.length > maxTurfParcelTiles;
       if (tooLargeForParcels) {
-        return [turf.id, summarizeDrawnTurf(turf, geojson, primaryScoreCol, {}, 0, false, true)] as const;
+        return [turf.id, summarizeDrawnTurf(turf, geojson, primaryScoreCol, {}, 0, emptyParcelProsperity(), null, false, true)] as const;
       }
       const tiles = await Promise.all(tileKeys.map(async key => {
         const cached = parcelTileDataRef.current.get(key);
@@ -1521,7 +2460,7 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
         }
       }));
       const housing = countTurfHousingFromTileList(turf, tiles);
-      return [turf.id, summarizeDrawnTurf(turf, geojson, primaryScoreCol, housing.counts, housing.total, false, false)] as const;
+      return [turf.id, summarizeDrawnTurf(turf, geojson, primaryScoreCol, housing.counts, housing.total, housing.prosperity, housing.route, false, false)] as const;
     })).then(entries => {
       if (!cancelled) setDrawnTurfStats(Object.fromEntries(entries));
     }).catch(() => {
@@ -1531,6 +2470,57 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
       cancelled = true;
     };
   }, [drawnTurfs, geojson, parcelManifest, primaryScoreCol]);
+
+  useEffect(() => {
+    const turf = selectedDrawnTurf;
+    const route = selectedDrawnTurfStats?.route;
+    if (!turf || !route || route.stops.length < 2) return;
+    const signature = roadRouteSignature(route);
+    const cached = roadRoutes[turf.id];
+    if (cached?.signature === signature && cached.status !== "failed") return;
+
+    const controller = new AbortController();
+    const loadingTimer = window.setTimeout(() => {
+      setRoadRoutes(current => ({
+        ...current,
+        [turf.id]: {
+          signature,
+          status: "loading",
+          coordinates: [],
+          distanceMiles: 0,
+          routedStopCount: 0,
+          message: "Routing on OSM roads...",
+        },
+      }));
+    }, 0);
+
+    routeStopsOnRoad(route.stops, controller.signal)
+      .then(roadRoute => {
+        setRoadRoutes(current => ({
+          ...current,
+          [turf.id]: { ...roadRoute, signature },
+        }));
+      })
+      .catch(error => {
+        if (controller.signal.aborted) return;
+        setRoadRoutes(current => ({
+          ...current,
+          [turf.id]: {
+            signature,
+            status: "failed",
+            coordinates: [],
+            distanceMiles: 0,
+            routedStopCount: 0,
+            message: error instanceof Error ? error.message : "Road routing failed.",
+          },
+        }));
+      });
+
+    return () => {
+      window.clearTimeout(loadingTimer);
+      controller.abort();
+    };
+  }, [roadRoutes, selectedDrawnTurf, selectedDrawnTurfStats?.route]);
 
   const insightRows = useMemo(() => {
     if (canvassArea) {
@@ -1671,7 +2661,14 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
     setDrawnTurfs(current => [...current, next]);
     setSelectedDrawnTurfId(next.id);
     setDraftTurfPoints([]);
+    setIsDraftingNewTurf(false);
     toast.success(`${next.name} created.`);
+  }
+
+  function startNewDraftTurf() {
+    setIsDraftingNewTurf(true);
+    setSelectedDrawnTurfId("");
+    setDraftTurfPoints([]);
   }
 
   function renameDrawnTurf(turfId: string, name: string) {
@@ -1681,13 +2678,14 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
   function deleteDrawnTurf(turfId: string) {
     setDrawnTurfs(current => current.filter(turf => turf.id !== turfId));
     setSelectedDrawnTurfId(current => current === turfId ? "" : current);
+    setIsDraftingNewTurf(false);
   }
 
   function zoomToDrawnTurf(turf: DrawnTurf) {
     const map = mapRef.current;
     if (!leaflet || !map || turf.points.length < 3) return;
     const bounds = leaflet.latLngBounds(turf.points.map(point => [point.lat, point.lon]));
-    map.fitBounds(bounds, { animate: true, maxZoom: 16, paddingTopLeft: [40, 140], paddingBottomRight: [430, 40] });
+    map.fitBounds(bounds, { animate: true, maxZoom: 16, paddingTopLeft: [40, 160], paddingBottomRight: [382, 40] });
   }
 
   function copyDrawnTurfSummary() {
@@ -1698,7 +2696,11 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
       `Block groups: ${whole.format(selectedDrawnTurfStats.blockGroups)}`,
       `House dots counted: ${whole.format(selectedDrawnTurfStats.housingTotal)}`,
       `Households: ${whole.format(selectedDrawnTurfStats.households)} | Donors: ${nf.format(selectedDrawnTurfStats.donors)} | Revenue: ${money.format(selectedDrawnTurfStats.revenue)}`,
+      `Prosperity proxy: ${selectedDrawnTurfStats.prosperityLabel} | Value/resident: ${money.format(selectedDrawnTurfStats.valuePerResident)} | Income proxy/person: ${money.format(selectedDrawnTurfStats.incomeProxyPerPerson)}`,
       `Priority: ${nf.format(selectedDrawnTurfStats.averagePriority)} | Mission fit: ${nf.format(selectedDrawnTurfStats.missionAlignment)} | Door access: ${nf.format(selectedDrawnTurfStats.doorAccess)}`,
+      selectedDrawnTurfStats.route
+        ? `Route: ${whole.format(selectedDrawnTurfStats.route.stopCount)} doors | ${nf.format(selectedRoadRoute?.distanceMiles || selectedDrawnTurfStats.route.distanceMiles)} mi ${selectedRoadRoute?.status === "ready" ? "on roads" : "ordered"} | start ${formatCoordinate(selectedDrawnTurfStats.route.start)} | end ${formatCoordinate(selectedDrawnTurfStats.route.end)}`
+        : "Route: no house dots available yet.",
       "",
       "House types:",
       ...(topHousing.length ? topHousing.map(item => `${item.label}: ${whole.format(item.count)} (${nf.format(item.share)}%)`) : ["No parcel dots counted."]),
@@ -1712,12 +2714,27 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
 
   function exportDrawnTurfCsv() {
     if (!selectedDrawnTurf || !selectedDrawnTurfStats) return;
+    const route = selectedDrawnTurfStats.route;
+    const roadRoute = selectedRoadRoute && (selectedRoadRoute.status === "ready" || selectedRoadRoute.status === "partial")
+      ? selectedRoadRoute
+      : null;
     const rowsOut = [
-      ["turf", "block_groups", "house_dots", "households", "donors", "revenue", "priority", "mission_fit", "door_access", "avoid_pressure", "opposition_risk"].join(","),
+      ["turf", "block_groups", "house_dots", "route_doors", "route_distance_miles", "route_mode", "route_start_lat", "route_start_lon", "route_end_lat", "route_end_lon", "estimated_residents", "value_per_resident", "income_proxy_per_person", "prosperity_proxy", "households", "donors", "revenue", "priority", "mission_fit", "door_access", "avoid_pressure", "opposition_risk"].join(","),
       [
         selectedDrawnTurf.name,
         selectedDrawnTurfStats.blockGroups,
         selectedDrawnTurfStats.housingTotal,
+        route?.stopCount ?? 0,
+        roadRoute?.distanceMiles ?? route?.distanceMiles ?? 0,
+        roadRoute ? roadRoute.status : "ordered_direct",
+        route?.start.lat ?? "",
+        route?.start.lon ?? "",
+        route?.end.lat ?? "",
+        route?.end.lon ?? "",
+        selectedDrawnTurfStats.estimatedResidents,
+        selectedDrawnTurfStats.valuePerResident,
+        selectedDrawnTurfStats.incomeProxyPerPerson,
+        selectedDrawnTurfStats.prosperityLabel,
         selectedDrawnTurfStats.households,
         selectedDrawnTurfStats.donors,
         selectedDrawnTurfStats.revenue,
@@ -1733,6 +2750,12 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
       "",
       ["demographic", "value"].join(","),
       ...selectedDrawnTurfStats.demographics.map(item => [item.label, item.value].map(value => csvEscape(String(value))).join(",")),
+      "",
+      ["route_order", "latitude", "longitude", "housing_type", "label"].join(","),
+      ...(route?.stops ?? []).map(stop => [stop.order, stop.lat, stop.lon, stop.housingType, stop.label].map(value => csvEscape(String(value))).join(",")),
+      "",
+      ["road_shape_order", "latitude", "longitude"].join(","),
+      ...(roadRoute?.coordinates ?? []).map((point, index) => [index + 1, point.lat, point.lon].map(value => csvEscape(String(value))).join(",")),
     ];
     const blob = new Blob([rowsOut.join("\n")], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -1744,16 +2767,16 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
   }
 
   return (
-    <Card className="overflow-hidden">
-      <CardHeader className="gap-4 xl:flex-row xl:items-center xl:justify-between">
-        <div>
+    <Card className="overflow-hidden" data-tour="map-overview">
+      <CardHeader className="gap-5 p-5 2xl:flex-row 2xl:items-end 2xl:justify-between">
+        <div className="max-w-3xl">
           <CardTitle>Unified Canvass Map</CardTitle>
           <CardDescription>
             {loading ? "Loading scored block groups..." : error || mapStatusText(geojson, filteredGeojson, activeGeographyPreset, canvassArea)}
           </CardDescription>
         </div>
-        <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-5">
-          <LabeledControl label="Area preset">
+        <div className="grid w-full grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6 2xl:w-auto">
+          <LabeledControl label="Area preset" tourId="map-area-controls">
             <Select value={activeGeographyPreset || "none"} onValueChange={value => {
               const selectedValue = value || "none";
               const next = selectedValue === "none" ? "" : selectedValue;
@@ -1762,7 +2785,7 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
               setMapCounties([]);
               setMapMunicipalities([]);
             }}>
-              <SelectTrigger className="w-full md:w-48"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="w-full 2xl:w-44"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectGroup>
                   <SelectItem value="none">Choose area</SelectItem>
@@ -1773,9 +2796,9 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
           </LabeledControl>
           <MultiSelect label="Map counties" values={mapGeographyOptions.counties} selected={mapCounties} onSelectedChange={next => { setCanvassArea(null); setActiveGeographyPreset(""); setMapCounties(next); }} emptyLabel="Choose counties" />
           <MultiSelect label="Map municipalities" values={mapGeographyOptions.municipalities} selected={mapMunicipalities} onSelectedChange={next => { setCanvassArea(null); setActiveGeographyPreset(""); setMapMunicipalities(next); }} emptyLabel="Choose towns" />
-          <LabeledControl label="Layer">
+          <LabeledControl label="Layer" tourId="map-layer-controls">
             <Select value={activeLayerField} onValueChange={value => { if (!value) return; setActiveLayerField(value); setActivePreset(""); }}>
-              <SelectTrigger className="w-full md:w-48"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="w-full 2xl:w-44"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectGroup>{mapLayerCatalog.map(layer => <SelectItem key={layer.field} value={layer.field}>{layer.label}</SelectItem>)}</SelectGroup>
               </SelectContent>
@@ -1788,7 +2811,7 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
               setActivePreset(next);
               if (next) setActiveLayerField(mapPresetDefinitions[next].layer);
             }}>
-              <SelectTrigger className="w-full md:w-48"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="w-full 2xl:w-44"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectGroup>
                   <SelectItem value="none">No preset</SelectItem>
@@ -1804,7 +2827,7 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
               setActiveLayerField(value);
               setActivePreset("");
             }}>
-              <SelectTrigger className="w-full md:w-48"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="w-full 2xl:w-44"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectGroup>
                   <SelectItem value="none">{rawLayers.length ? "Choose raw stat" : "Loading raw stats..."}</SelectItem>
@@ -1817,9 +2840,21 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
       </CardHeader>
       <CardContent className="p-0">
         {error ? <p className="m-4 border border-destructive bg-destructive/10 p-4 text-sm font-medium text-destructive">{error}</p> : null}
-        <div className="relative h-[78vh] min-h-[680px] bg-muted">
-          <div ref={mapNodeRef} className="size-full" aria-label="Block group choropleth map" />
-          <form onSubmit={buildCanvass} className="absolute left-14 right-4 top-4 z-[650] grid gap-2 bg-card/95 p-3 shadow-xl backdrop-blur md:grid-cols-[minmax(240px,1fr)_92px_78px_78px_auto] lg:right-[430px]">
+        <div ref={mapShellRef} className={`gbh-map-shell relative h-[84vh] min-h-[760px] bg-muted xl:min-h-[820px] ${isMapFullscreen ? "gbh-map-shell--fullscreen" : ""}`}>
+          <div ref={mapNodeRef} className="size-full" aria-label="Block group choropleth map" data-tour="map-canvas" />
+          <Button
+            type="button"
+            size="icon"
+            variant="secondary"
+            className="absolute right-4 top-[92px] z-[760] shadow-xl lg:top-4"
+            onClick={toggleMapFullscreen}
+            aria-label={isMapFullscreen ? "Exit fullscreen map" : "Open fullscreen map"}
+            title={isMapFullscreen ? "Exit fullscreen map" : "Open fullscreen map"}
+            data-tour="map-fullscreen"
+          >
+            {isMapFullscreen ? <Minimize2 /> : <Maximize2 />}
+          </Button>
+          <form onSubmit={buildCanvass} className="absolute left-14 right-4 top-4 z-[650] grid gap-3 bg-card/95 p-4 shadow-xl backdrop-blur md:grid-cols-[minmax(280px,1fr)_104px_86px_86px_auto] lg:right-[386px]" data-tour="address-planner">
             <LabeledControl label="Address">
               <InputGroup className="bg-background">
                 <InputGroupAddon><Search /></InputGroupAddon>
@@ -1851,35 +2886,38 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
               <Input type="number" min="0.5" step="0.5" value={canvassShiftHours} onChange={event => setCanvassShiftHours(event.target.value)} />
             </LabeledControl>
             <div className="flex items-end">
-              <Button type="submit" disabled={canvassBuilding || loading || rowsLoading}>
+              <Button type="submit" disabled={canvassBuilding || loading || rowsLoading} data-tour="build-canvass">
                 {canvassBuilding ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Navigation data-icon="inline-start" />}
                 Build Canvass
               </Button>
             </div>
           </form>
-          <div className="absolute left-14 top-[132px] z-[560] flex max-w-[calc(100%-5rem)] flex-wrap gap-2 lg:top-24">
+          <div className="absolute left-4 top-[150px] z-[560] flex max-w-[calc(100%-2rem)] flex-wrap gap-3 md:left-14 md:max-w-[calc(100%-5rem)] lg:top-28 lg:max-w-[calc(100%-29rem)]" data-tour="quick-layer-chips">
             <LayerChip label="Field Priority" active={activeLayerField === "map_priority_index"} onClick={() => { setActiveLayerField("map_priority_index"); setActivePreset(""); }} />
             <LayerChip label="Mission Fit" active={activeLayerField === "mission_alignment_index"} onClick={() => { setActiveLayerField("mission_alignment_index"); setActivePreset(""); }} />
             <LayerChip label="Door Access" active={activeLayerField === "door_access_index"} onClick={() => { setActiveLayerField("door_access_index"); setActivePreset(""); }} />
             <LayerChip label="Avoid Pressure" active={activeLayerField === "avoid_pressure_index"} onClick={() => { setActiveLayerField("avoid_pressure_index"); setActivePreset(""); }} />
             <LayerChip label="Target Fit" active={activeLayerField === "target_presence_index"} onClick={() => { setActiveLayerField("target_presence_index"); setActivePreset(""); }} />
             <LayerChip label="House Dots" active={showParcelDots} onClick={() => setShowParcelDots(value => !value)} />
-            <LayerChip label="Create Turfs" active={turfMode} onClick={() => setTurfMode(value => !value)} />
+            <LayerChip label="Create Turfs" active={turfMode} onClick={() => setTurfMode(value => !value)} tourId="create-turfs-chip" />
           </div>
           {turfMode ? (
-            <div className="absolute left-14 top-[188px] z-[620] flex max-w-[calc(100%-5rem)] flex-wrap items-center gap-2 border border-border bg-card/95 p-3 text-sm shadow-xl backdrop-blur lg:top-36 lg:left-[390px] lg:max-w-[calc(100%-53rem)]">
+            <div className="absolute left-4 top-[218px] z-[620] flex max-w-[calc(100%-2rem)] flex-wrap items-center gap-3 border border-border bg-card/95 p-4 text-sm shadow-xl backdrop-blur md:left-14 md:max-w-[calc(100%-5rem)] lg:left-[374px] lg:top-44 lg:max-w-[calc(100%-49rem)]" data-tour="turf-toolbar">
               <MousePointer2 className="text-primary" />
-              <span className="font-medium">{draftTurfPoints.length ? `${draftTurfPoints.length} points placed` : "Right-click the map to place turf points."}</span>
-              <Button type="button" size="sm" onClick={finishDraftTurf} disabled={draftTurfPoints.length < 3}>
+              <span className="font-medium">{selectedDrawnTurf ? `Editing ${selectedDrawnTurf.name} · right-click the map to add points` : draftTurfPoints.length ? `${draftTurfPoints.length} points placed · drag dots to edit · right-click dots to delete` : "Click New Turf, then right-click the map to place turf points."}</span>
+              <Button type="button" size="sm" variant={selectedDrawnTurf ? "outline" : "secondary"} onClick={startNewDraftTurf}>
+                <Plus data-icon="inline-start" />New Turf
+              </Button>
+              <Button type="button" size="sm" onClick={finishDraftTurf} disabled={Boolean(selectedDrawnTurf) || draftTurfPoints.length < 3}>
                 <Pencil data-icon="inline-start" />Finish
               </Button>
-              <Button type="button" size="sm" variant="outline" onClick={() => setDraftTurfPoints(points => points.slice(0, -1))} disabled={!draftTurfPoints.length}>
+              <Button type="button" size="sm" variant="outline" onClick={() => setDraftTurfPoints(points => points.slice(0, -1))} disabled={Boolean(selectedDrawnTurf) || !draftTurfPoints.length}>
                 <RotateCcw data-icon="inline-start" />Undo
               </Button>
-              <Button type="button" size="sm" variant="ghost" onClick={() => setDraftTurfPoints([])} disabled={!draftTurfPoints.length}>Cancel</Button>
+              <Button type="button" size="sm" variant="ghost" onClick={() => { setDraftTurfPoints([]); setIsDraftingNewTurf(false); }} disabled={Boolean(selectedDrawnTurf) || !draftTurfPoints.length}>Cancel</Button>
             </div>
           ) : null}
-          <div className="absolute left-14 top-[188px] z-[500] max-h-[calc(100%-13rem)] w-[min(360px,calc(100%-5rem))] overflow-auto border border-border bg-card/95 p-3 shadow-xl backdrop-blur lg:top-36">
+          <div className="absolute left-4 top-[218px] z-[500] max-h-[calc(100%-15rem)] w-[min(340px,calc(100%-2rem))] overflow-auto border border-border bg-card/95 p-4 shadow-xl backdrop-blur md:left-14 md:w-[min(340px,calc(100%-5rem))] lg:top-44" data-tour="insight-panel">
             <div className="flex items-center gap-2">
               <Layers className="text-muted-foreground" />
               <div>
@@ -1888,7 +2926,7 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
               </div>
             </div>
             <Separator className="my-3" />
-            <div className="flex flex-col gap-2">
+            <div className="flex flex-col gap-3">
               {loading ? Array.from({ length: 5 }, (_, index) => <Skeleton key={index} className="h-12 w-full" />) : null}
               {!loading && !insightRows.length ? <p className="border border-border bg-muted/40 p-3 text-sm font-medium text-muted-foreground">Enter an address to build a canvass map, or choose an area preset for broad exploration.</p> : null}
               {insightRows.map(item => {
@@ -1908,8 +2946,11 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
               turfs={drawnTurfs}
               selectedTurf={selectedDrawnTurf}
               stats={selectedDrawnTurfStats}
+              roadRoute={selectedRoadRoute}
               manifest={parcelManifest}
               onSelect={turf => {
+                setIsDraftingNewTurf(false);
+                setDraftTurfPoints([]);
                 setSelectedDrawnTurfId(turf.id);
                 zoomToDrawnTurf(turf);
               }}
@@ -1935,7 +2976,7 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
             />
           )}
           {showParcelDots ? (
-            <div className="absolute bottom-5 left-14 z-[500] max-w-[min(360px,calc(100%-5rem))] border border-border bg-card/95 p-3 text-xs shadow-xl backdrop-blur">
+            <div className="absolute bottom-5 left-4 z-[500] max-w-[min(360px,calc(100%-2rem))] border border-border bg-card/95 p-4 text-xs shadow-xl backdrop-blur md:left-14 md:max-w-[min(360px,calc(100%-5rem))]" data-tour="house-dots-legend">
               <div className="mb-2 flex items-center justify-between gap-3">
                 <h3 className="font-black uppercase text-primary">House Dots</h3>
                 <span className="text-muted-foreground">{parcelStatus}</span>
@@ -1950,9 +2991,9 @@ function TurfMap({ rows, rowsLoading, primaryScoreCol }: { rows: TurfRow[]; rows
   );
 }
 
-function LayerChip({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+function LayerChip({ label, active, onClick, tourId }: { label: string; active: boolean; onClick: () => void; tourId?: string }) {
   return (
-    <Button type="button" size="sm" variant={active ? "default" : "secondary"} className="shadow-lg" onClick={onClick}>
+    <Button type="button" size="sm" variant={active ? "default" : "secondary"} className="shadow-lg" onClick={onClick} data-tour={tourId}>
       {label}
     </Button>
   );
@@ -1972,7 +3013,7 @@ function CanvassDecisionPanel(props: {
   const selectedLimit = Math.max(1, Math.min(8, Math.round(number(props.crewSize) * number(props.shiftHours) / 2 || 4)));
   const visibleRecommendations = props.area?.recommendations.slice(0, selectedLimit) || [];
   return (
-    <aside aria-label="Canvass decision panel" className="absolute bottom-3 left-3 right-3 z-[570] max-h-[44%] overflow-auto border border-border bg-card/95 p-4 shadow-2xl backdrop-blur lg:bottom-5 lg:left-auto lg:right-4 lg:top-24 lg:max-h-none lg:w-[400px]">
+    <aside aria-label="Canvass decision panel" className="absolute bottom-3 left-3 right-3 z-[570] max-h-[44%] overflow-auto border border-border bg-card/95 p-5 shadow-2xl backdrop-blur lg:bottom-5 lg:left-auto lg:right-4 lg:top-28 lg:max-h-none lg:w-[356px]" data-tour="decision-panel">
       {!props.area ? (
         <div className="flex min-h-80 flex-col justify-between gap-6">
           <div>
@@ -1986,7 +3027,7 @@ function CanvassDecisionPanel(props: {
           </div>
         </div>
       ) : (
-        <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-5">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <Badge variant={props.area.summary.decision === "Go" ? "default" : props.area.summary.decision === "Scout" ? "secondary" : "destructive"}>{props.area.summary.decision}</Badge>
@@ -2028,7 +3069,7 @@ function CanvassDecisionPanel(props: {
             <span>{props.parcelStatus}</span>
             <span>Parcel dots are privacy-safe residential parcel context, not exact household records.</span>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2" data-tour="canvass-handoff">
             <Button variant="outline" onClick={props.onCopy}>
               <Clipboard data-icon="inline-start" />Copy
             </Button>
@@ -2037,7 +3078,7 @@ function CanvassDecisionPanel(props: {
             </Button>
           </div>
           <Separator />
-          <div>
+          <div data-tour="ranked-zones">
             <h4 className="mb-2 font-black uppercase text-primary">Ranked zones</h4>
             <div className="flex flex-col gap-2">
               {visibleRecommendations.map(item => (
@@ -2060,6 +3101,7 @@ function CustomTurfPanel(props: {
   turfs: DrawnTurf[];
   selectedTurf: DrawnTurf | null;
   stats: DrawnTurfStats | null;
+  roadRoute: TurfRoadRoute | null;
   manifest: ParcelTileManifest | null;
   onSelect: (turf: DrawnTurf) => void;
   onRename: (turfId: string, name: string) => void;
@@ -2079,13 +3121,22 @@ function CustomTurfPanel(props: {
       ? whole.format(hardHouseCount)
       : whole.format(props.stats.households)
     : "0";
+  const routeDistance = props.roadRoute && (props.roadRoute.status === "ready" || props.roadRoute.status === "partial")
+    ? props.roadRoute.distanceMiles
+    : props.stats?.route?.distanceMiles ?? 0;
+  const routeStatus = roadRouteStatusLabel(props.roadRoute);
+  const routeDistanceLabel = props.roadRoute?.status === "loading" && props.stats?.route
+    ? "Routing"
+    : props.roadRoute?.status === "failed" && props.stats?.route
+      ? "Unavailable"
+      : `${nf.format(routeDistance)} mi`;
   return (
-    <aside aria-label="Custom turf panel" className="absolute bottom-3 left-3 right-3 z-[570] max-h-[44%] overflow-auto border border-border bg-card/95 p-4 shadow-2xl backdrop-blur lg:bottom-5 lg:left-auto lg:right-4 lg:top-24 lg:max-h-none lg:w-[400px]">
-      <div className="flex flex-col gap-4">
+    <aside aria-label="Custom turf panel" className="absolute bottom-3 left-3 right-3 z-[570] max-h-[44%] overflow-auto border border-border bg-card/95 p-5 shadow-2xl backdrop-blur lg:bottom-5 lg:left-auto lg:right-4 lg:top-28 lg:max-h-none lg:w-[356px]" data-tour="custom-turf-panel">
+      <div className="flex flex-col gap-5">
         <div>
           <p className="text-xs font-black uppercase text-primary">Custom turfs</p>
           <h3 className="mt-1 text-3xl font-black leading-tight">{props.selectedTurf?.name || "Draw a turf."}</h3>
-          <p className="mt-2 text-sm text-muted-foreground">Right-click places turf points. Left mouse drag still moves the map.</p>
+          <p className="mt-2 text-sm text-muted-foreground">Select a turf, then right-click the map to add points to it. Use New Turf for a separate shape.</p>
         </div>
         {props.turfs.length ? (
           <div className="flex flex-col gap-2">
@@ -2099,7 +3150,7 @@ function CustomTurfPanel(props: {
             ))}
           </div>
         ) : (
-          <p className="border border-border bg-muted/40 p-3 text-sm font-medium text-muted-foreground">No saved turfs yet. Right-click at least three points, then finish the turf.</p>
+          <p className="border border-border bg-muted/40 p-3 text-sm font-medium text-muted-foreground">No saved turfs yet. Click New Turf, right-click at least three points, then finish the turf.</p>
         )}
         {props.selectedTurf && props.stats ? (
           <Fragment>
@@ -2109,15 +3160,35 @@ function CustomTurfPanel(props: {
               <Metric label="Block groups" value={whole.format(props.stats.blockGroups)} />
               <Metric label="House dots" value={houseDotsLabel} />
               <Metric label="Households" value={householdsLabel} />
+              <Metric label="Residents est." value={whole.format(props.stats.estimatedResidents)} />
+              <Metric label="Value / resident" value={props.stats.valuePerResident ? money.format(props.stats.valuePerResident) : "n/a"} />
+              <Metric label="Income proxy" value={props.stats.incomeProxyPerPerson ? money.format(props.stats.incomeProxyPerPerson) : "n/a"} />
               <Metric label="Revenue" value={money.format(props.stats.revenue)} />
               <Metric label="Priority" value={nf.format(props.stats.averagePriority)} />
               <Metric label="Mission fit" value={nf.format(props.stats.missionAlignment)} />
               <Metric label="Door access" value={nf.format(props.stats.doorAccess)} />
               <Metric label="Avoid" value={nf.format(props.stats.avoidPressure)} />
             </div>
+            <p className="border border-border bg-muted/40 p-3 text-sm font-medium text-muted-foreground">
+              Prosperity proxy: {props.stats.prosperityLabel}. Estimated from parcel assessed-value bands divided by assumed residents per housing type.
+            </p>
             {props.stats.tooLargeForParcels ? (
               <p className="border border-border bg-muted/40 p-3 text-sm font-medium text-muted-foreground">This turf is too large for a parcel dot summary. Demographic stats are still shown.</p>
             ) : null}
+            <div className="border border-border bg-muted/30 p-3" data-tour="custom-turf-route">
+              <h4 className="mb-2 font-black uppercase text-primary">Route</h4>
+              {props.stats.route ? (
+                <div className="grid gap-2 text-sm">
+                  <div className="grid grid-cols-2 gap-2">
+                    <Metric label="Doors" value={whole.format(props.stats.route.stopCount)} />
+                    <Metric label="Distance" value={routeDistanceLabel} />
+                  </div>
+                  <p className="text-muted-foreground">Start at door {props.stats.route.start.order}, finish at door {props.stats.route.end.order}. {routeStatus}. The pink line is shown only when OSM road geometry is available.</p>
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">{props.stats.loadingHousing ? "Loading route from house dots..." : "No house dots available to route."}</p>
+              )}
+            </div>
             <div>
               <h4 className="mb-2 font-black uppercase text-primary">House Types</h4>
               <div className="flex flex-col gap-2">
@@ -2191,6 +3262,14 @@ function shortActionLabel(action: PlannerRecommendation["action"]) {
   return "Skip";
 }
 
+function roadRouteStatusLabel(route: TurfRoadRoute | null) {
+  if (route?.status === "loading") return "Routing on roads...";
+  if (route?.status === "ready") return "Road-following route";
+  if (route?.status === "partial") return "Partial road route";
+  if (route?.status === "failed") return "Road route unavailable";
+  return "Preparing route";
+}
+
 function ParcelDotLegend({ manifest }: { manifest: ParcelTileManifest | null }) {
   const housingTypes = manifest?.housing_types ?? fallbackParcelHousingTypes;
   return (
@@ -2212,7 +3291,7 @@ function MapLegend({ layer, field, geojson }: { layer: MapLayerDefinition; field
     ? palette.map((_, index) => stats.min + ((stats.max - stats.min) / (palette.length - 1)) * index)
     : [0, 25, 50, 75, 100];
   return (
-    <div className="absolute bottom-5 right-4 z-[500] border border-border bg-card/95 p-3 text-xs shadow-xl backdrop-blur">
+    <div className="absolute bottom-5 right-4 z-[500] border border-border bg-card/95 p-3 text-xs shadow-xl backdrop-blur lg:right-[386px]" data-tour="map-legends">
       <h3 className="mb-1 font-black uppercase text-primary">{layer.label}</h3>
       <div className="flex flex-col gap-1">
         {palette.map((color, index) => (
@@ -2414,6 +3493,14 @@ function slugify(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "plan";
 }
 
+function sleep(ms: number) {
+  return new Promise(resolve => window.setTimeout(resolve, ms));
+}
+
+function formatCoordinate(point: Pick<TurfPoint, "lat" | "lon">) {
+  return `${point.lat.toFixed(5)}, ${point.lon.toFixed(5)}`;
+}
+
 function readSavedState(): SavedState {
   if (typeof window === "undefined") return {};
   try {
@@ -2571,6 +3658,71 @@ function pointFeatureInsideTurf(feature: GeoJsonFeature, turf: DrawnTurf) {
   return pointInPolygon({ lat, lon }, turf.points);
 }
 
+function emptyParcelProsperity(): ParcelProsperitySummary {
+  return {
+    estimatedResidents: 0,
+    valuePerResidentWeightedTotal: 0,
+    incomeProxyWeightedTotal: 0,
+  };
+}
+
+function parcelEstimatedResidents(properties: Record<string, unknown>) {
+  const explicit = number(properties.estimated_residents);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  const type = String(properties.housing_type || "residential_other");
+  const units = parcelUnitEstimate(type, String(properties.units_bucket || "unknown"));
+  return units * residentsPerUnit(type);
+}
+
+function parcelUnitEstimate(type: string, unitsBucket: string) {
+  if (type === "residential_land_or_aux") return 0;
+  if (type === "single_family" || type.startsWith("condo_")) return 1;
+  if (type === "two_family") return 2;
+  if (type === "three_family") return 3;
+  if (type === "small_multifamily") return unitsBucket === "4-9" ? 6.5 : Math.max(4, number(unitsBucket) || 4);
+  if (type === "large_multifamily") return unitsBucket === "10+" ? 12 : Math.max(10, number(unitsBucket) || 10);
+  if (unitsBucket === "4-9") return 6.5;
+  if (unitsBucket === "10+") return 12;
+  return Math.max(1, number(unitsBucket) || 1);
+}
+
+function residentsPerUnit(type: string) {
+  if (type === "residential_land_or_aux") return 0;
+  if (type === "single_family") return 2.6;
+  if (type === "two_family" || type === "three_family" || type === "small_multifamily") return 2.25;
+  if (type === "large_multifamily") return 1.8;
+  if (type.startsWith("condo_")) return 1.9;
+  return 2.2;
+}
+
+function parcelValuePerResident(properties: Record<string, unknown>, residents: number) {
+  if (residents <= 0) return 0;
+  const midpoint = valueBandMidpoint(String(properties.value_band || ""));
+  return midpoint ? midpoint / residents : 0;
+}
+
+function valueBandMidpoint(label: string) {
+  const midpoints: Record<string, number> = {
+    "<$250k": 175000,
+    "$250k-$499k": 375000,
+    "$500k-$749k": 625000,
+    "$750k-$999k": 875000,
+    "$1.0M-$1.49M": 1250000,
+    "$1.5M-$2.49M": 2000000,
+    "$2.5M+": 3000000,
+  };
+  return midpoints[label] || 0;
+}
+
+function prosperityLabel(valuePerResident: number) {
+  if (!valuePerResident) return "unknown";
+  if (valuePerResident < 100000) return "modest";
+  if (valuePerResident < 175000) return "comfortable";
+  if (valuePerResident < 275000) return "prosperous";
+  if (valuePerResident < 425000) return "high-capacity";
+  return "very high-capacity";
+}
+
 function countTurfHousingFromTiles(turf: DrawnTurf, tileKeys: string[], tileCache: Map<string, GeoJsonCollection>) {
   return countTurfHousingFromTileList(turf, tileKeys.map(key => tileCache.get(key) ?? null));
 }
@@ -2578,15 +3730,32 @@ function countTurfHousingFromTiles(turf: DrawnTurf, tileKeys: string[], tileCach
 function countTurfHousingFromTileList(turf: DrawnTurf, tiles: Array<GeoJsonCollection | null>) {
   const counts: Record<string, number> = {};
   let total = 0;
+  const prosperity = emptyParcelProsperity();
+  const routeCandidates: Omit<TurfRouteStop, "order">[] = [];
   tiles.forEach(tile => {
     tile?.features.forEach(feature => {
       if (!pointFeatureInsideTurf(feature, turf)) return;
       const type = String(feature.properties?.housing_type || "residential_other");
+      const residentEstimate = parcelEstimatedResidents(feature.properties || {});
+      const valuePerResident = parcelValuePerResident(feature.properties || {}, residentEstimate);
+      const incomeProxy = valuePerResident ? valuePerResident / 4 : 0;
       counts[type] = (counts[type] || 0) + 1;
       total += 1;
+      prosperity.estimatedResidents += residentEstimate;
+      prosperity.valuePerResidentWeightedTotal += valuePerResident * residentEstimate;
+      prosperity.incomeProxyWeightedTotal += incomeProxy * residentEstimate;
+      if (feature.geometry.type === "Point") {
+        const [lon, lat] = feature.geometry.coordinates;
+        routeCandidates.push({
+          lat,
+          lon,
+          housingType: type,
+          label: String(feature.properties?.housing_type_label || type),
+        });
+      }
     });
   });
-  return { counts, total };
+  return { counts, total, prosperity, route: buildTurfRoute(routeCandidates) };
 }
 
 function summarizeDrawnTurf(
@@ -2595,6 +3764,8 @@ function summarizeDrawnTurf(
   primaryScoreCol: string,
   housingCounts: Record<string, number>,
   housingTotal: number,
+  parcelProsperity: ParcelProsperitySummary,
+  route: TurfRouteSummary | null,
   loadingHousing: boolean,
   tooLargeForParcels: boolean,
 ): DrawnTurfStats {
@@ -2603,6 +3774,12 @@ function summarizeDrawnTurf(
   const households = rows.reduce((sum, row) => sum + firstFinite(row.estimated_canvassable_households, row.raw_occupied_households, 0), 0);
   const donors = rows.reduce((sum, row) => sum + firstFinite(row.estimated_donors, 0), 0);
   const revenue = rows.reduce((sum, row) => sum + firstFinite(row.estimated_revenue, 0), 0);
+  const valuePerResident = parcelProsperity.estimatedResidents
+    ? parcelProsperity.valuePerResidentWeightedTotal / parcelProsperity.estimatedResidents
+    : 0;
+  const incomeProxyPerPerson = parcelProsperity.estimatedResidents
+    ? parcelProsperity.incomeProxyWeightedTotal / parcelProsperity.estimatedResidents
+    : 0;
   const demographicFields = [
     ["Owner occupied", "raw_owner_occupied_share"],
     ["Renter occupied", "renter_occupied_share"],
@@ -2632,6 +3809,11 @@ function summarizeDrawnTurf(
     demographics: demographicFields.map(([label, field]) => ({ label, value: formatCellValue(field, weightedAverageField(rows, field)) })),
     housingCounts,
     housingTotal,
+    estimatedResidents: parcelProsperity.estimatedResidents,
+    valuePerResident,
+    incomeProxyPerPerson,
+    prosperityLabel: prosperityLabel(valuePerResident),
+    route,
     loadingHousing,
     tooLargeForParcels,
   };
@@ -2643,6 +3825,275 @@ function featureTouchesTurf(feature: GeoJsonFeature, turf: DrawnTurf) {
   const featurePoints = geometryPoints(feature.geometry);
   if (featurePoints.some(point => pointInPolygon(point, turf.points))) return true;
   return turf.points.some(point => pointInGeometry(point, feature.geometry));
+}
+
+function roadRouteSignature(route: TurfRouteSummary) {
+  return route.stops.map(stop => `${stop.lat.toFixed(5)},${stop.lon.toFixed(5)}`).join("|");
+}
+
+async function routeStopsOnRoad(stops: TurfRouteStop[], signal: AbortSignal): Promise<Omit<TurfRoadRoute, "signature">> {
+  const roadStops = roadRouteAnchorStops(stops);
+  const chunks = roadRouteChunks(roadStops);
+  const coordinates: TurfPoint[] = [];
+  let distanceMilesTotal = 0;
+  let routedStopCount = 0;
+  let failedChunks = 0;
+
+  for (const chunk of chunks) {
+    try {
+      const result = await fetchRoadRouteChunk(chunk, signal);
+      appendRouteCoordinates(coordinates, result.coordinates);
+      distanceMilesTotal += result.distanceMiles;
+      routedStopCount += Math.max(0, chunk.length - 1);
+    } catch {
+      if (signal.aborted) throw new Error("Road routing cancelled.");
+      failedChunks += 1;
+    }
+  }
+
+  if (coordinates.length < 2 || routedStopCount === 0) {
+    throw new Error("Road routing failed for this turf.");
+  }
+
+  const status = failedChunks ? "partial" : "ready";
+  return {
+    status,
+    coordinates,
+    distanceMiles: distanceMilesTotal,
+    routedStopCount: roadStops.length,
+    message: failedChunks
+      ? `Road routing completed, but ${failedChunks} segment${failedChunks === 1 ? "" : "s"} could not be routed on roads.`
+      : "Road route follows OSM roads.",
+  };
+}
+
+function roadRouteAnchorStops(stops: TurfRouteStop[]) {
+  if (stops.length <= maxRoadRouteAnchorStops) return stops;
+  const anchors = new Map<number, TurfRouteStop>();
+  anchors.set(0, stops[0]);
+  anchors.set(stops.length - 1, stops[stops.length - 1]);
+  const step = (stops.length - 1) / (maxRoadRouteAnchorStops - 1);
+  for (let index = 1; index < maxRoadRouteAnchorStops - 1; index += 1) {
+    const stopIndex = Math.round(index * step);
+    anchors.set(stopIndex, stops[stopIndex]);
+  }
+  return [...anchors.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, stop]) => stop);
+}
+
+function roadRouteChunks(stops: TurfRouteStop[]) {
+  const chunks: TurfRouteStop[][] = [];
+  const stride = Math.max(2, maxRoadRouteWaypointsPerRequest - 1);
+  for (let index = 0; index < stops.length - 1; index += stride) {
+    chunks.push(stops.slice(index, Math.min(index + maxRoadRouteWaypointsPerRequest, stops.length)));
+  }
+  return chunks;
+}
+
+async function fetchRoadRouteChunk(stops: TurfRouteStop[], signal: AbortSignal) {
+  const coordinates = stops.map(stop => `${stop.lon.toFixed(6)},${stop.lat.toFixed(6)}`).join(";");
+  const url = `${roadRouteServiceUrl}/${coordinates}?overview=full&geometries=geojson&steps=false&continue_straight=false`;
+  const response = await fetch(url, { signal });
+  if (!response.ok) throw new Error("Road route request failed.");
+  const data = await response.json() as {
+    code?: string;
+    routes?: Array<{
+      distance?: number;
+      geometry?: { coordinates?: Array<[number, number]> };
+    }>;
+  };
+  const route = data.routes?.[0];
+  const routeCoordinates = route?.geometry?.coordinates;
+  if (data.code !== "Ok" || !route || !routeCoordinates?.length) {
+    throw new Error("No road route found.");
+  }
+  return {
+    coordinates: routeCoordinates.map(([lon, lat]) => ({ lat, lon })),
+    distanceMiles: (route.distance ?? 0) / 1609.344,
+  };
+}
+
+function appendRouteCoordinates(target: TurfPoint[], next: TurfPoint[]) {
+  next.forEach(point => {
+    const previous = target[target.length - 1];
+    if (previous && Math.abs(previous.lat - point.lat) < 0.000001 && Math.abs(previous.lon - point.lon) < 0.000001) return;
+    target.push(point);
+  });
+}
+
+function buildTurfRoute(candidates: Omit<TurfRouteStop, "order">[]): TurfRouteSummary | null {
+  const uniqueStops = uniqueRouteCandidates(candidates);
+  if (!uniqueStops.length) return null;
+  if (uniqueStops.length === 1) {
+    const only = { ...uniqueStops[0], order: 1 };
+    return {
+      stops: [only],
+      start: only,
+      end: only,
+      stopCount: 1,
+      distanceMiles: 0,
+      directDistanceMiles: 0,
+    };
+  }
+
+  const projected = projectRouteCandidates(uniqueStops);
+  const { startIndex, endIndex } = routeEndpointIndexes(projected);
+  const routeIndexes = projected.length <= maxNearestNeighborRouteStops
+    ? nearestNeighborRoute(projected, startIndex, endIndex)
+    : sweepRoute(projected, startIndex, endIndex);
+  const optimizedIndexes = routeIndexes.length <= maxTwoOptRouteStops
+    ? twoOptOpenRoute(projected, routeIndexes)
+    : routeIndexes;
+  const stops = optimizedIndexes.map((index, order) => ({ ...uniqueStops[index], order: order + 1 }));
+  return {
+    stops,
+    start: stops[0],
+    end: stops[stops.length - 1],
+    stopCount: stops.length,
+    distanceMiles: routeDistanceMiles(stops),
+    directDistanceMiles: distanceMiles(stops[0].lat, stops[0].lon, stops[stops.length - 1].lat, stops[stops.length - 1].lon),
+  };
+}
+
+function uniqueRouteCandidates(candidates: Omit<TurfRouteStop, "order">[]) {
+  const seen = new Set<string>();
+  const out: Omit<TurfRouteStop, "order">[] = [];
+  candidates.forEach(candidate => {
+    if (!Number.isFinite(candidate.lat) || !Number.isFinite(candidate.lon)) return;
+    const key = `${candidate.lat.toFixed(6)},${candidate.lon.toFixed(6)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(candidate);
+  });
+  return out;
+}
+
+function projectRouteCandidates(stops: Omit<TurfRouteStop, "order">[]) {
+  const centerLat = stops.reduce((sum, stop) => sum + stop.lat, 0) / stops.length;
+  const milesPerDegreeLat = 69.0;
+  const milesPerDegreeLon = Math.max(Math.cos(centerLat * Math.PI / 180) * milesPerDegreeLat, Number.EPSILON);
+  return stops.map((stop, index) => ({
+    index,
+    x: stop.lon * milesPerDegreeLon,
+    y: stop.lat * milesPerDegreeLat,
+  }));
+}
+
+function routeEndpointIndexes(projected: Array<{ index: number; x: number; y: number }>) {
+  if (projected.length > maxExactEndpointRouteStops) {
+    return routeEndpointIndexes(routeEndpointCandidates(projected));
+  }
+  let best = { startIndex: 0, endIndex: 1, distanceSquared: -1 };
+  for (let i = 0; i < projected.length; i += 1) {
+    for (let j = i + 1; j < projected.length; j += 1) {
+      const distanceSquared = projectedDistanceSquared(projected[i], projected[j]);
+      if (distanceSquared > best.distanceSquared) {
+        best = { startIndex: projected[i].index, endIndex: projected[j].index, distanceSquared };
+      }
+    }
+  }
+  return best;
+}
+
+function routeEndpointCandidates(projected: Array<{ index: number; x: number; y: number }>) {
+  const candidates = new Map<number, { index: number; x: number; y: number }>();
+  const sortedGroups = [
+    [...projected].sort((a, b) => a.x - b.x),
+    [...projected].sort((a, b) => a.y - b.y),
+    [...projected].sort((a, b) => (a.x + a.y) - (b.x + b.y)),
+    [...projected].sort((a, b) => (a.x - a.y) - (b.x - b.y)),
+  ];
+  sortedGroups.forEach(group => {
+    [...group.slice(0, 24), ...group.slice(-24)].forEach(point => candidates.set(point.index, point));
+  });
+  return [...candidates.values()];
+}
+
+function nearestNeighborRoute(projected: Array<{ index: number; x: number; y: number }>, startIndex: number, endIndex: number) {
+  const pointByIndex = new Map(projected.map(point => [point.index, point]));
+  const unvisited = new Set(projected.map(point => point.index));
+  unvisited.delete(startIndex);
+  unvisited.delete(endIndex);
+  const route = [startIndex];
+  let current = startIndex;
+  while (unvisited.size) {
+    const currentPoint = pointByIndex.get(current);
+    if (!currentPoint) break;
+    let nearestIndex = -1;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    unvisited.forEach(index => {
+      const point = pointByIndex.get(index);
+      if (!point) return;
+      const distance = projectedDistanceSquared(currentPoint, point);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+    });
+    if (nearestIndex < 0) break;
+    route.push(nearestIndex);
+    unvisited.delete(nearestIndex);
+    current = nearestIndex;
+  }
+  route.push(endIndex);
+  return route;
+}
+
+function sweepRoute(projected: Array<{ index: number; x: number; y: number }>, startIndex: number, endIndex: number) {
+  const middle = projected.filter(point => point.index !== startIndex && point.index !== endIndex);
+  const stripeCount = Math.max(3, Math.round(Math.sqrt(middle.length) / 2));
+  const minX = Math.min(...middle.map(point => point.x));
+  const maxX = Math.max(...middle.map(point => point.x));
+  const width = Math.max((maxX - minX) / stripeCount, Number.EPSILON);
+  const stripes = Array.from({ length: stripeCount }, () => [] as Array<{ index: number; x: number; y: number }>);
+  middle.forEach(point => {
+    const stripeIndex = Math.max(0, Math.min(stripeCount - 1, Math.floor((point.x - minX) / width)));
+    stripes[stripeIndex].push(point);
+  });
+  const orderedMiddle = stripes.flatMap((stripe, index) => (
+    stripe.sort((a, b) => index % 2 === 0 ? a.y - b.y : b.y - a.y)
+  ));
+  return [startIndex, ...orderedMiddle.map(point => point.index), endIndex];
+}
+
+function twoOptOpenRoute(projected: Array<{ index: number; x: number; y: number }>, route: number[]) {
+  const pointByIndex = new Map(projected.map(point => [point.index, point]));
+  const next = [...route];
+  let improved = true;
+  let passes = 0;
+  while (improved && passes < 4) {
+    improved = false;
+    passes += 1;
+    for (let i = 1; i < next.length - 2; i += 1) {
+      for (let j = i + 1; j < next.length - 1; j += 1) {
+        const a = pointByIndex.get(next[i - 1]);
+        const b = pointByIndex.get(next[i]);
+        const c = pointByIndex.get(next[j]);
+        const d = pointByIndex.get(next[j + 1]);
+        if (!a || !b || !c || !d) continue;
+        const current = Math.sqrt(projectedDistanceSquared(a, b)) + Math.sqrt(projectedDistanceSquared(c, d));
+        const swapped = Math.sqrt(projectedDistanceSquared(a, c)) + Math.sqrt(projectedDistanceSquared(b, d));
+        if (swapped + 0.000001 < current) {
+          next.splice(i, j - i + 1, ...next.slice(i, j + 1).reverse());
+          improved = true;
+        }
+      }
+    }
+  }
+  return next;
+}
+
+function projectedDistanceSquared(a: { x: number; y: number }, b: { x: number; y: number }) {
+  return (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+}
+
+function routeDistanceMiles(stops: TurfRouteStop[]) {
+  return stops.reduce((sum, stop, index) => {
+    if (index === 0) return 0;
+    const previous = stops[index - 1];
+    return sum + distanceMiles(previous.lat, previous.lon, stop.lat, stop.lon);
+  }, 0);
 }
 
 function turfTileKeys(turf: DrawnTurf, zoom: number) {
@@ -2667,6 +4118,45 @@ function turfBounds(turf: DrawnTurf) {
     east: Math.max(bounds.east, point.lon),
     west: Math.min(bounds.west, point.lon),
   }), { north: -90, south: 90, east: -180, west: 180 });
+}
+
+function insertTurfPointByNearestEdge(points: TurfPoint[], point: TurfPoint) {
+  if (points.length < 3) return [...points, point];
+  let insertAfterIndex = points.length - 1;
+  let shortestDistance = Number.POSITIVE_INFINITY;
+  points.forEach((start, index) => {
+    const end = points[(index + 1) % points.length];
+    const distance = pointToSegmentDistanceMiles(point, start, end);
+    if (distance < shortestDistance) {
+      shortestDistance = distance;
+      insertAfterIndex = index;
+    }
+  });
+  return [
+    ...points.slice(0, insertAfterIndex + 1),
+    point,
+    ...points.slice(insertAfterIndex + 1),
+  ];
+}
+
+function pointToSegmentDistanceMiles(point: TurfPoint, segmentStart: TurfPoint, segmentEnd: TurfPoint) {
+  const lat = (point.lat + segmentStart.lat + segmentEnd.lat) / 3;
+  const milesPerDegreeLat = 69.0;
+  const milesPerDegreeLon = Math.max(Math.cos(lat * Math.PI / 180) * milesPerDegreeLat, Number.EPSILON);
+  const px = point.lon * milesPerDegreeLon;
+  const py = point.lat * milesPerDegreeLat;
+  const ax = segmentStart.lon * milesPerDegreeLon;
+  const ay = segmentStart.lat * milesPerDegreeLat;
+  const bx = segmentEnd.lon * milesPerDegreeLon;
+  const by = segmentEnd.lat * milesPerDegreeLat;
+  const dx = bx - ax;
+  const dy = by - ay;
+  const segmentLengthSquared = dx * dx + dy * dy;
+  if (!segmentLengthSquared) return distanceMiles(point.lat, point.lon, segmentStart.lat, segmentStart.lon);
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / segmentLengthSquared));
+  const closestX = ax + t * dx;
+  const closestY = ay + t * dy;
+  return Math.hypot(px - closestX, py - closestY);
 }
 
 function pointInPolygon(point: TurfPoint, polygon: TurfPoint[]) {
@@ -2794,10 +4284,11 @@ function lonlatToTile(lon: number, lat: number, zoom: number) {
   };
 }
 
-function parcelDotStyle(feature: GeoJsonFeature, manifest: ParcelTileManifest): CircleMarkerOptions {
+function parcelDotStyle(feature: GeoJsonFeature, manifest: ParcelTileManifest, renderer?: Renderer): CircleMarkerOptions {
   const type = String(feature.properties?.housing_type || "residential_other");
   const housingType = manifest.housing_types[type] ?? fallbackParcelHousingTypes.residential_other;
   return {
+    renderer,
     radius: 4,
     color: "#ffffff",
     weight: 0.8,
@@ -2808,14 +4299,31 @@ function parcelDotStyle(feature: GeoJsonFeature, manifest: ParcelTileManifest): 
 }
 
 function parcelTooltipHtml(properties: Record<string, unknown>) {
-  return `<strong>${escapeHtml(String(properties.housing_type_label || "Residential parcel"))}</strong><br>${escapeHtml(String(properties.value_band || "value unknown"))}`;
+  const residents = parcelEstimatedResidents(properties);
+  const valuePerResident = parcelValuePerResident(properties, residents);
+  const incomeProxy = valuePerResident ? valuePerResident / 4 : 0;
+  return [
+    `<strong>${escapeHtml(String(properties.housing_type_label || "Residential parcel"))}</strong>`,
+    escapeHtml(String(properties.value_band || "value unknown")),
+    `Prosperity: ${escapeHtml(String(properties.prosperity_proxy || prosperityLabel(valuePerResident)))}`,
+    residents ? `Residents est.: ${escapeHtml(nf.format(residents))}` : "",
+    valuePerResident ? `Value/resident: ${escapeHtml(money.format(valuePerResident))}` : "",
+    incomeProxy ? `Income proxy/person: ${escapeHtml(money.format(incomeProxy))}` : "",
+  ].filter(Boolean).join("<br>");
 }
 
 function parcelPopupHtml(properties: Record<string, unknown>) {
+  const residents = parcelEstimatedResidents(properties);
+  const valuePerResident = parcelValuePerResident(properties, residents);
+  const incomeProxy = valuePerResident ? valuePerResident / 4 : 0;
   const rows = [
     ["Housing type", String(properties.housing_type_label || "Residential other")],
     ["Units", String(properties.units_bucket || "unknown")],
     ["Assessed value", String(properties.value_band || "unknown")],
+    ["Estimated residents", residents ? nf.format(residents) : "unknown"],
+    ["Value / resident", valuePerResident ? money.format(valuePerResident) : String(properties.value_per_resident_band || "unknown")],
+    ["Income proxy / person", incomeProxy ? money.format(incomeProxy) : String(properties.income_proxy_band || "unknown")],
+    ["Prosperity proxy", String(properties.prosperity_proxy || prosperityLabel(valuePerResident))],
     ["Year built", String(properties.year_built_decade || "unknown")],
     ["Style", String(properties.style || "")],
     ["Assessor records", String(properties.assessor_record_count || "")],
