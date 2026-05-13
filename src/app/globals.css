@@ -261,7 +261,17 @@
     display: none !important;
   }
 
+  .driver-overlay,
+  .driver-overlay * {
+    pointer-events: none !important;
+  }
+
   .gbh-tour-dialogue {
-    z-index: 10020;
+    z-index: 2147483647;
+  }
+
+  .driver-active .gbh-tour-dialogue,
+  .driver-active .gbh-tour-dialogue * {
+    pointer-events: auto !important;
   }
 }
